@@ -120,7 +120,7 @@ void PairBlaBla::coeff(int narg, char **arg)
   double beta_one = utils::numeric(FLERR, arg[5], false, lmp);
   double r0_one = utils::numeric(FLERR, arg[6], false, lmp);
   double cut_one = cut_global;
-  if (narg == 10) cut_one = utils::numeric(FLERR, arg[7], false, lmp);
+  if (narg == 8) cut_one = utils::numeric(FLERR, arg[7], false, lmp);
 
   int count = 0;
   for (int i = ilo; i <= ihi; i++) {
@@ -235,8 +235,8 @@ if (eflag) evdwl = factor_lj * (aexp - bexp - offset[itype][jtype]);
     }
   }
 }
-// if (vflag_fdotr) virial_fdotr_compute();
-// }
+ if (vflag_fdotr) virial_fdotr_compute();
+ }
 
 
 /* ---------------------------------------------------------------------- */
@@ -346,4 +346,37 @@ void PairBlaBla::read_restart_settings(FILE *fp)
 }
 
 
+/* ----------------------------------------------------------------------
+   proc 0 writes to data file
+------------------------------------------------------------------------- */
 
+void PairBlaBla::write_data(FILE *fp)
+{
+  for (int i = 1; i <= atom->ntypes; i++)
+    fprintf(fp, "%d %g %g %g %g %g\n", i, biga0[i][i], alpha[i][i], biga1[i][i], beta[i][i],
+            r0[i][i]);
+}
+
+/* ----------------------------------------------------------------------
+   proc 0 writes all pairs to data file
+------------------------------------------------------------------------- */
+
+void PairBlaBla::write_data_all(FILE *fp)
+{
+  for (int i = 1; i <= atom->ntypes; i++)
+    for (int j = i; j <= atom->ntypes; j++)
+      fprintf(fp, "%d %d %g %g %g %g %g %g\n", i, j, biga0[i][j], alpha[i][j], biga1[i][j],
+              beta[i][j], r0[i][j], cut[i][j]);
+}
+
+
+/* ---------------------------------------------------------------------- */
+
+void *PairBlaBla::extract(const char *str, int &dim)
+{
+  dim = 2;
+  if (strcmp(str, "biga0") == 0) return (void *) biga0;
+  if (strcmp(str, "biga1") == 0) return (void *) biga1;
+  if (strcmp(str, "r0") == 0) return (void *) r0;
+  return nullptr;
+}
