@@ -45,6 +45,7 @@ class PairBlaBla : public Pair {
   void *extract(const char *, int &) override;
   
   protected:
+  double cut_coul;
   double cut_global;
   double **cut;
   double **biga0, **alpha, **biga1, **beta, **r0;

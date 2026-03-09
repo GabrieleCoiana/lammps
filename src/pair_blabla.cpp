@@ -36,6 +36,9 @@ using namespace LAMMPS_NS;
 
 PairBlaBla::PairBlaBla(LAMMPS *lmp) : Pair(lmp)
 {
+
+if (comm->me == 0) utils::logmesg(lmp, "PairBlaBla ctor: set ewaldflag={}\n", ewaldflag);
+  ewaldflag = 1;
   writedata = 1;
 }
 
@@ -45,6 +48,9 @@ PairBlaBla::PairBlaBla(LAMMPS *lmp) : Pair(lmp)
 
 PairBlaBla::~PairBlaBla()
 {
+// GABRIELE 
+utils::logmesg(lmp,"destroy! funcccc GABRIIIII \n");
+
   if (allocated) {
     memory->destroy(setflag);
     memory->destroy(cutsq);
@@ -64,6 +70,9 @@ PairBlaBla::~PairBlaBla()
 
 void PairBlaBla::allocate()
 {
+// GABRIELE 
+utils::logmesg(lmp,"allocate funcccc GABRIIIII \n");
+
   allocated = 1;
   int np1 = atom->ntypes + 1;
 
@@ -88,7 +97,13 @@ void PairBlaBla::allocate()
 
 void PairBlaBla::settings(int narg, char **arg)
 {
-  if (narg != 1) error->all(FLERR, "Pair style bond/gauss must have exactly one argument");
+// GABRIELE 
+if (comm->me == 0) {
+utils::logmesg(lmp,"I am rank {} and I am in settings funcccc GABRIIIII \n", comm->me);
+}
+  ewaldflag = true;
+  
+  if (narg != 1) error->all(FLERR, "Pair style blabla must have exactly one argument");
   cut_global = utils::numeric(FLERR, arg[0], false, lmp);
 
   // reset per-type pair cutoffs that have been explicitly set previously
@@ -107,6 +122,10 @@ void PairBlaBla::settings(int narg, char **arg)
 
 void PairBlaBla::coeff(int narg, char **arg)
 {
+// GABRIELE 
+utils::logmesg(lmp,"coeff funcccc GABRIIIII \n");
+
+
   if (narg < 7 || narg > 8) error->all(FLERR, "Incorrect args for pair coefficients");
   if (!allocated) allocate();
 
@@ -146,6 +165,8 @@ void PairBlaBla::coeff(int narg, char **arg)
 
 double PairBlaBla::init_one(int i, int j)
 {
+// GABRIELE 
+utils::logmesg(lmp,"init_one funcccc GABRIIIII \n");
   if (setflag[i][j] == 0) error->all(FLERR, "All pair coeffs are not set");
 
   if (offset_flag) {
@@ -170,6 +191,9 @@ double PairBlaBla::init_one(int i, int j)
 
 void PairBlaBla::compute(int eflag, int vflag)
 {
+// GABRIELE 
+utils::logmesg(lmp,"compute funcccc GABRIIIII \n");
+
   int i, j, ii, jj, inum, jnum, itype, jtype;
   double xtmp, ytmp, ztmp, delx, dely, delz, evdwl, fpair;
   double rsq, r, dr, aexp, bexp, factor_lj;
@@ -244,6 +268,9 @@ if (eflag) evdwl = factor_lj * (aexp - bexp - offset[itype][jtype]);
 double PairBlaBla::single(int /*i*/, int /*j*/, int itype, int jtype, double rsq,
                              double /*factor_coul*/, double factor_lj, double &fforce)
 {
+// GABRIELE 
+utils::logmesg(lmp,"single funcccc GABRIIIII \n");
+
   double r, dr, aexp, bexp;
 
   r = sqrt(rsq);
@@ -262,6 +289,9 @@ double PairBlaBla::single(int /*i*/, int /*j*/, int itype, int jtype, double rsq
 
 void PairBlaBla::write_restart(FILE *fp)
 {
+// GABRIELE 
+utils::logmesg(lmp,"write_restart funcccc GABRIIIII \n");
+
   write_restart_settings(fp);
 
   int i, j;
@@ -286,6 +316,9 @@ void PairBlaBla::write_restart(FILE *fp)
 
 void PairBlaBla::write_restart_settings(FILE *fp)
 {
+// GABRIELE 
+utils::logmesg(lmp,"write_restart_settings funcccc GABRIIIII \n");
+
   fwrite(&cut_global, sizeof(double), 1, fp);
   fwrite(&offset_flag, sizeof(int), 1, fp);
   fwrite(&mix_flag, sizeof(int), 1, fp);
@@ -299,6 +332,9 @@ void PairBlaBla::write_restart_settings(FILE *fp)
 
 void PairBlaBla::read_restart(FILE *fp)
 {
+// GABRIELE 
+utils::logmesg(lmp,"read_restart funcccc GABRIIIII \n");
+
   read_restart_settings(fp);
 
   allocate();
@@ -335,6 +371,9 @@ void PairBlaBla::read_restart(FILE *fp)
 
 void PairBlaBla::read_restart_settings(FILE *fp)
 {
+// GABRIELE 
+utils::logmesg(lmp,"read_restart_settings funcccc GABRIIIII \n");
+
   if (comm->me == 0) {
     utils::sfread(FLERR, &cut_global, sizeof(double), 1, fp, nullptr, error);
     utils::sfread(FLERR, &offset_flag, sizeof(int), 1, fp, nullptr, error);
@@ -352,6 +391,9 @@ void PairBlaBla::read_restart_settings(FILE *fp)
 
 void PairBlaBla::write_data(FILE *fp)
 {
+// GABRIELE 
+utils::logmesg(lmp,"write_data funcccc GABRIIIII \n");
+
   for (int i = 1; i <= atom->ntypes; i++)
     fprintf(fp, "%d %g %g %g %g %g\n", i, biga0[i][i], alpha[i][i], biga1[i][i], beta[i][i],
             r0[i][i]);
@@ -363,6 +405,9 @@ void PairBlaBla::write_data(FILE *fp)
 
 void PairBlaBla::write_data_all(FILE *fp)
 {
+// GABRIELE 
+utils::logmesg(lmp,"write_data_all funcccc GABRIIIII \n");
+
   for (int i = 1; i <= atom->ntypes; i++)
     for (int j = i; j <= atom->ntypes; j++)
       fprintf(fp, "%d %d %g %g %g %g %g %g\n", i, j, biga0[i][j], alpha[i][j], biga1[i][j],
@@ -374,9 +419,13 @@ void PairBlaBla::write_data_all(FILE *fp)
 
 void *PairBlaBla::extract(const char *str, int &dim)
 {
-  dim = 2;
+// GABRIELE 
+utils::logmesg(lmp,"extract funcccc GABRIIIII \n");
+
+  dim = 3;
   if (strcmp(str, "biga0") == 0) return (void *) biga0;
   if (strcmp(str, "biga1") == 0) return (void *) biga1;
   if (strcmp(str, "r0") == 0) return (void *) r0;
+  if (strcmp(str, "cut_coul") == 0) return (void *) &cut_coul;
   return nullptr;
 }

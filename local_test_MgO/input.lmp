@@ -1,0 +1,40 @@
+##########################################################
+# MD with latte on diamond
+##########################################################
+dimension       3
+boundary        p p p   # periodic boundary conditions 
+atom_style      charge
+# atom_modify     map array
+units           metal
+
+# read starting configuration
+read_data       POSCAR_MgO.lmp
+replicate       1 1 1 
+
+# Ewald
+kspace_style ewald 1e-09
+
+# blabla potential
+pair_style blabla 10.0
+pair_coeff * * 8.2464e13 12.48 0.042644277 0.44 3.56
+# pair_coeff 1 2 8.2464e13 12.48 0.042644277 0.44 3.56
+
+# pair_style   blabla  #latte
+# pair_coeff * * ../model_latte_large
+
+run 0
+# --- end MD ---
+
+
+
+
+
+
+
+#lattice         diamond $a
+#region          box prism 0 1.0 0 1.0 0 1.0 0.0 0.0 0.0
+#create_box      1 box
+#create_atoms    1 box
+
+#mass 1 12.0107
+

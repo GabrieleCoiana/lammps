@@ -1,16 +1,10 @@
-// clang-format off
-/* ----------------------------------------------------------------------
-   LAMMPS - Large-scale Atomic/Molecular Massively Parallel Simulator
-   https://www.lammps.org/, Sandia National Laboratories
-   LAMMPS development team: developers@lammps.org
-
-   Copyright (2003) Sandia Corporation.  Under the terms of Contract
-   DE-AC04-94AL85000 with Sandia Corporation, the U.S. Government retains
-   certain rights in this software.  This software is distributed under
-   the GNU General Public License.
-
-   See the README file in the top-level LAMMPS directory.
-------------------------------------------------------------------------- */
+//###########################################################################
+//# Copyright (c), The PANNAdevs group. All rights reserved.                #
+//# This file is part of the PANNA code.                                    #
+//#                                                                         #
+//# The code is hosted on GitLab at https://gitlab.com/PANNAdevs/panna      #
+//# For further information on the license, see the LICENSE.txt file        #
+//###########################################################################
 
 /* ----------------------------------------------------------------------
    Contributing authors: Roy Pollock (LLNL), Paul Crozier (SNL)
@@ -19,32 +13,38 @@
      triclinic added by Stan Moore (SNL)
 ------------------------------------------------------------------------- */
 
-#include "ewald.h"
-
+#include "ewald_panna.h"
+#include <mpi.h>
+#include <cmath>
 #include "atom.h"
 #include "comm.h"
-#include "domain.h"
-#include "error.h"
 #include "force.h"
+#include "pair.h"
+#include "domain.h"
 #include "math_const.h"
 #include "memory.h"
-#include "pair.h"
-
-#include <cmath>
+#include "error.h"
+#include <iostream>
+#include "stdio.h"
+#include <string>
+#include <fstream>
+#include <algorithm>
+#include <cstring>
 
 using namespace LAMMPS_NS;
 using namespace MathConst;
 
-static constexpr double SMALL = 0.00001;
+#define SMALL 0.00001
 
 /* ---------------------------------------------------------------------- */
 
-Ewald::Ewald(LAMMPS *lmp) : KSpace(lmp),
-  kxvecs(nullptr), kyvecs(nullptr), kzvecs(nullptr), ug(nullptr), eg(nullptr), vg(nullptr),
-  ek(nullptr), sfacrl(nullptr), sfacim(nullptr), sfacrl_all(nullptr), sfacim_all(nullptr),
-  cs(nullptr), sn(nullptr), sfacrl_A(nullptr), sfacim_A(nullptr), sfacrl_A_all(nullptr),
-  sfacim_A_all(nullptr), sfacrl_B(nullptr), sfacim_B(nullptr), sfacrl_B_all(nullptr),
-  sfacim_B_all(nullptr)
+EwaldPANNA::EwaldPANNA(LAMMPS *lmp) : KSpace(lmp),
+  kxvecs(NULL), kyvecs(NULL), kzvecs(NULL), ug(NULL), eg(NULL), vg(NULL), vg_v3(NULL),
+  ek(NULL), sfacrl(NULL), sfacim(NULL), sfacrl_all(NULL), sfacim_all(NULL),
+  sfacrl_g(NULL), sfacim_g(NULL), sfacrl_all_g(NULL), sfacim_all_g(NULL),
+  cs(NULL), sn(NULL), sfacrl_A(NULL), sfacim_A(NULL), sfacrl_A_all(NULL),
+  sfacim_A_all(NULL), sfacrl_B(NULL), sfacim_B(NULL), sfacrl_B_all(NULL),
+  sfacim_B_all(NULL)
 {
   group_allocate_flag = 0;
   kmax_created = 0;
@@ -54,74 +54,212 @@ Ewald::Ewald(LAMMPS *lmp) : KSpace(lmp),
   accuracy_relative = 0.0;
 
   kmax = 0;
-  kxvecs = kyvecs = kzvecs = nullptr;
-  ug = nullptr;
-  eg = vg = nullptr;
-  sfacrl = sfacim = sfacrl_all = sfacim_all = nullptr;
+  kxvecs = kyvecs = kzvecs = NULL;
+  ug = NULL;
+  eg = vg = NULL;
+  sfacrl = sfacim = sfacrl_all = sfacim_all = NULL;
+  sfacrl_g = sfacim_g = sfacrl_all_g = sfacim_all_g = NULL;
 
   nmax = 0;
-  ek = nullptr;
-  cs = sn = nullptr;
+  ek = NULL;
+  cs = sn = NULL;
 
   kcount = 0;
 }
 
-/* ---------------------------------------------------------------------- */
+// ########################################################
+// ########################################################
 
-void Ewald::settings(int narg, char **arg)
+// Get a new line skipping comments or empty lines
+// Set value=... if [...], return 1
+// Fill key,value if 'key=value', return 2
+// Set value=... if ..., return 3
+// Return 0 if eof, <0 if error, >0 if okay
+int EwaldPANNA::get_input_line(std::ifstream* file, std::string* key, std::string* value){
+  std::string line;
+  int parsed = 0; int vc = 1;
+  while(!parsed){
+    std::getline(*file,line);
+    // Exit on EOF
+    if(file->eof()) return 0;
+    // Exit on bad read
+    if(file->bad()) return -1;
+    // Remove spaces
+    line.erase (std::remove(line.begin(), line.end(), ' '), line.end());
+    // Skip empty line
+    if(line.length()==0) continue;
+    // Skip comments
+    if(line.at(0)=='#') continue;
+    // Parse headers
+    if(line.at(0)=='['){
+      *value = line.substr(1,line.length()-2);
+      return 1;
+    }
+    // Check if we have version information:
+    if(line.at(0)=='!') { vc=0 ;}
+    // Look for equal sign
+    std::string eq = "=";
+    size_t eqpos = line.find(eq);
+    // Parse key-value pair
+    if(eqpos != std::string::npos){
+      *key = line.substr(0,eqpos);
+      *value = line.substr(eqpos+1,line.length()-1);
+      if (vc == 0) { vc = 1 ; return 3; }
+      return 2;
+    }
+    std::cout << line << std::endl;
+    parsed = 1;
+  }
+  return -1;
+}
+
+int EwaldPANNA::get_parameters(char* directory, char* filename)
 {
-  if (narg != 1) error->all(FLERR,"Illegal kspace_style {} command", force->kspace_style);
+  //const double panna_pi = 3.14159265358979323846;
+  // Parsing the potential parameters
+  std::ifstream params_file;
+  std::ifstream weights_file;
+  std::string key, value;
+  std::string dir_string(directory);
+  std::string param_string(filename);
+  std::string file_string(dir_string+"/"+param_string);
+  std::string wfile_string;
 
+  // Initializing some parameters before reading:
+  Nspecies = -1;
+  // Flags to keep track of set parameters
+  //
+  params_file.open(file_string.c_str());
+  // section keeps track of input file sections
+  // -1 in the beginning
+  // 0 for gvect params
+  // i for species i (1 based)
+  int section = -1;
+  // parseint checks the status of input parsing
+  int parseint = get_input_line(&params_file,&key,&value);
+  while(parseint>0){
+    // Parse line
+    if(parseint==1){
+      if(value=="GVECT_PARAMETERS"){ section = 0; }
+
+      // Long range section
+      // If Long range section is found, change section
+      if(value=="LONG_RANGE"){
+        section = 1;
+      }
+    }
+    else if(parseint==2){
+      // Parse param section
+      if (section==0){
+        if(key=="Nspecies"){
+          Nspecies = std::atoi(value.c_str());
+          // Small check
+          if(Nspecies<1){
+            std::cout << "Nspecies needs to be >0." << std::endl;
+            return -2; }
+        }
+      }
+      else if(section==1){
+        // Read species gaussian width,species atomic hardness
+        if(key=="gaussian_width"){
+          // Parse gaussian width
+          std::string comma = ",";
+          size_t pos = 0; int s = 0;
+          gaussian_width = new double[Nspecies];
+          value=value.substr(1, value.size() - 2); //get rid of [ ]
+          while ((pos = value.find(comma)) != std::string::npos) {
+            gaussian_width[s] = std::atof(value.substr(0, pos).c_str());
+            value.erase(0, pos+1);  s++; }
+          if(value.length()>0){gaussian_width[s] = std::atof(value.c_str()); s++; };
+          }
+        if(key=="atomic_hardness"){
+          std::string comma = ",";
+          // Parse atomic hardness
+          size_t pos = 0; int s = 0;
+          hardness = new double[Nspecies];
+          value=value.substr(1, value.size() - 2); //get rid of [ ]
+          while ((pos = value.find(comma)) != std::string::npos) {
+            hardness[s] = std::atof(value.substr(0, pos).c_str());
+            value.erase(0, pos+1);  s++; }
+          if(value.length()>0){hardness[s] = std::atof(value.c_str()); s++; };
+	}
+      }
+      else{
+        return -3;
+      }
+    }
+    // Get new  line
+    parseint = get_input_line(&params_file,&key,&value);
+  }
+  params_file.close();
+  return(0);
+}
+
+void EwaldPANNA::settings(int narg, char **arg)
+{
+  //if (narg != 3) error->all(FLERR,"Illegal kspace_style ewald command");
+
+
+  // We now expect a directory and the parameters file name (inside the directory) with all params
+  if (narg != 3) {
+    error->all(FLERR,"Format of kspace_style ewald/panna accuracy network_directory parameter_file\n");
+  }
   accuracy_relative = fabs(utils::numeric(FLERR,arg[0],false,lmp));
-  if (accuracy_relative > 1.0)
-    error->all(FLERR, "Invalid relative accuracy {:g} for kspace_style {}",
-               accuracy_relative, force->kspace_style);
+
+  std::cout << "Loading PANNA pair parameters from " << arg[1] << "/" << arg[2] << std::endl;
+  int gpout = get_parameters(arg[1], arg[2]);
+  if(gpout==0){
+    std::cout << "gaussian width and atomic hardness set!" << std::endl;
+  }
+  else{
+    std::cout << "Error " << gpout << " while reading gaussian width !" << std::endl;
+    exit(1);
+  }
+
 }
 
 /* ----------------------------------------------------------------------
    free all memory
 ------------------------------------------------------------------------- */
 
-Ewald::~Ewald()
+EwaldPANNA::~EwaldPANNA()
 {
-  Ewald::deallocate();
+  deallocate();
   if (group_allocate_flag) deallocate_groups();
   memory->destroy(ek);
   memory->destroy3d_offset(cs,-kmax_created);
   memory->destroy3d_offset(sn,-kmax_created);
 }
 
-/* ---------------------------------------------------------------------- */
-
-void Ewald::init()
+void EwaldPANNA::init()
 {
-  if (comm->me == 0) utils::logmesg(lmp,"Ewald initialization ...\n");
+  if (comm->me == 0) {
+    if (screen) fprintf(screen,"EwaldPANNA initialization ...\n");
+    if (logfile) fprintf(logfile,"EwaldPANNA initialization ...\n");
+  }
 
   // error check
 
   triclinic_check();
   if (domain->dimension == 2)
-    error->all(FLERR,"Cannot use Ewald with 2d simulation");
+    error->all(FLERR,"Cannot use EwaldPANNA with 2d simulation");
 
   if (!atom->q_flag) error->all(FLERR,"Kspace style requires atom attribute q");
 
   if (slabflag == 0 && domain->nonperiodic > 0)
-    error->all(FLERR,"Cannot use non-periodic boundaries with Ewald");
+    error->all(FLERR,"Cannot use non-periodic boundaries with EwaldPANNA");
   if (slabflag) {
     if (domain->xperiodic != 1 || domain->yperiodic != 1 ||
         domain->boundary[2][0] != 1 || domain->boundary[2][1] != 1)
-      error->all(FLERR,"Incorrect boundaries with slab Ewald");
+      error->all(FLERR,"Incorrect boundaries with slab EwaldPANNA");
     if (domain->triclinic)
-      error->all(FLERR,"Cannot (yet) use Ewald with triclinic box "
+      error->all(FLERR,"Cannot (yet) use EwaldPANNA with triclinic box "
                  "and slab correction");
   }
 
   // compute two charge force
 
   two_charge();
-  // GABRIELE
-  utils::logmesg(lmp,"GABRIIIII {} \n", two_charge());
-
 
   // extract short-range Coulombic cutoff from pair style
 
@@ -129,87 +267,65 @@ void Ewald::init()
   pair_check();
 
   int itmp;
-  auto *p_cutoff = (double *) force->pair->extract("cut_coul",itmp);
-  if (p_cutoff == nullptr)
-    error->all(FLERR,"KSpace style is incompatible with Pair style");
-  double cutoff = *p_cutoff;
-
   // compute qsum & qsqsum and warn if not charge-neutral
 
   scale = 1.0;
-  qqrd2e = force->qqrd2e;
+  //qqrd2e = force->qqrd2e;
+  qqrd2e = 14.39964547842567;
   qsum_qsq();
   natoms_original = atom->natoms;
 
   // set accuracy (force units) from accuracy_relative or accuracy_absolute
+  if (accuracy_relative > 0.0) {
+    accuracy = accuracy_relative;
+  }
+  else if (accuracy_absolute > 0.0) {
+    accuracy = accuracy_absolute;
+  }
+  else accuracy = 1e-6;
 
-  if (accuracy_absolute >= 0.0) accuracy = accuracy_absolute;
-  else accuracy = accuracy_relative * two_charge_force;
+ // if (accuracy_absolute >= 0.0) accuracy = accuracy_absolute;
+  //else accuracy = accuracy_relative * two_charge_force;
 
   // setup K-space resolution
 
   bigint natoms = atom->natoms;
 
   // use xprd,yprd,zprd even if triclinic so grid size is the same
-  // adjust z dimension for 2d slab Ewald
-  // 3d Ewald just uses zprd since slab_volfactor = 1.0
-
+  // adjust z dimension for 2d slab EwaldPANNA
+  // 3d EwaldPANNA just uses zprd since slab_volfactor = 1.0
   double xprd = domain->xprd;
   double yprd = domain->yprd;
   double zprd = domain->zprd;
   double zprd_slab = zprd*slab_volfactor;
 
-  // make initial g_ewald estimate
-  // based on desired accuracy and real space cutoff
-  // fluid-occupied volume used to estimate real-space error
-  // zprd used rather than zprd_slab
-
-  if (!gewaldflag) {
-    if (accuracy <= 0.0)
-      error->all(FLERR,"KSpace accuracy must be > 0");
-    if (q2 == 0.0)
-      error->all(FLERR,"Must use 'kspace_modify gewald' for uncharged system");
-    g_ewald = accuracy*sqrt(natoms*cutoff*xprd*yprd*zprd) / (2.0*q2);
-    if (g_ewald >= 1.0) g_ewald = (1.35 - 0.15*log(accuracy))/cutoff;
-    else g_ewald = sqrt(-log(g_ewald)) / cutoff;
-  }
-
-  // setup Ewald coefficients so can print stats
+  // setup EwaldPANNA coefficients so can print stats
 
   setup();
-
-  // final RMS accuracy
-
-  double lprx = rms(kxmax_orig,xprd,natoms,q2);
-  double lpry = rms(kymax_orig,yprd,natoms,q2);
-  double lprz = rms(kzmax_orig,zprd_slab,natoms,q2);
-  double lpr = sqrt(lprx*lprx + lpry*lpry + lprz*lprz) / sqrt(3.0);
-  double q2_over_sqrt = q2 / sqrt(natoms*cutoff*xprd*yprd*zprd_slab);
-  double spr = 2.0 *q2_over_sqrt * exp(-g_ewald*g_ewald*cutoff*cutoff);
-  double tpr = estimate_table_accuracy(q2_over_sqrt,spr);
-  double estimated_accuracy = sqrt(lpr*lpr + spr*spr + tpr*tpr);
 
   // stats
 
   if (comm->me == 0) {
-    std::string mesg = fmt::format("  G vector (1/distance) = {:.8g}\n",g_ewald);
-    mesg += fmt::format("  estimated absolute RMS force accuracy = {:.8g}\n",
-                       estimated_accuracy);
-    mesg += fmt::format("  estimated relative force accuracy = {:.8g}\n",
-                       estimated_accuracy/two_charge_force);
-    mesg += fmt::format("  KSpace vectors: actual max1d max3d = {} {} {}\n",
-                        kcount,kmax,kmax3d);
-    mesg += fmt::format("                  kxmax kymax kzmax  = {} {} {}\n",
-                        kxmax,kymax,kzmax);
-    utils::logmesg(lmp,mesg);
+    if (screen) {
+      fprintf(screen,"  KSpace vectors: actual max1d max3d = %d %d %d\n",
+              kcount,kmax,kmax3d);
+      fprintf(screen,"                  kxmax kymax kzmax  = %d %d %d\n",
+              kxmax,kymax,kzmax);
+    }
+    if (logfile) {
+      fprintf(logfile,"  KSpace vectors: actual max1d max3d = %d %d %d\n",
+              kcount,kmax,kmax3d);
+      fprintf(logfile,"                  kxmax kymax kzmax  = %d %d %d\n",
+              kxmax,kymax,kzmax);
+    }
   }
 }
 
 /* ----------------------------------------------------------------------
-   adjust Ewald coeffs, called initially and whenever volume has changed
+   adjust EwaldPANNA coeffs, called initially and whenever volume has changed
 ------------------------------------------------------------------------- */
 
-void Ewald::setup()
+void EwaldPANNA::setup()
 {
   // volume-dependent factors
 
@@ -217,8 +333,8 @@ void Ewald::setup()
   double yprd = domain->yprd;
   double zprd = domain->zprd;
 
-  // adjustment of z dimension for 2d slab Ewald
-  // 3d Ewald just uses zprd since slab_volfactor = 1.0
+  // adjustment of z dimension for 2d slab EwaldPANNA
+  // 3d EwaldPANNA just uses zprd since slab_volfactor = 1.0
 
   double zprd_slab = zprd*slab_volfactor;
   volume = xprd * yprd * zprd_slab;
@@ -261,7 +377,7 @@ void Ewald::setup()
     kmax = MAX(kxmax,kymax);
     kmax = MAX(kmax,kzmax);
     kmax3d = 4*kmax*kmax*kmax + 6*kmax*kmax + 3*kmax;
-
+    
     double gsqxmx = unitk[0]*unitk[0]*kxmax*kxmax;
     double gsqymx = unitk[1]*unitk[1]*kymax*kymax;
     double gsqzmx = unitk[2]*unitk[2]*kzmax*kzmax;
@@ -311,6 +427,8 @@ void Ewald::setup()
   }
 
   gsqmx *= 1.00001;
+  //gsqmx = 3.854505402092653*3.854505402092653;
+  //std::cout<<" gmax "<<sqrt(gsqmx)<<std::endl;
 
   // if size has grown, reallocate k-dependent and nlocal-dependent arrays
 
@@ -329,7 +447,7 @@ void Ewald::setup()
     kmax_created = kmax;
   }
 
-  // pre-compute Ewald coefficients
+  // pre-compute EwaldPANNA coefficients
 
   if (triclinic == 0)
     coeffs();
@@ -340,22 +458,94 @@ void Ewald::setup()
 /* ----------------------------------------------------------------------
    compute RMS accuracy for a dimension
 ------------------------------------------------------------------------- */
-
-double Ewald::rms(int km, double prd, bigint natoms, double q2)
+double EwaldPANNA::rms(int km, double prd, bigint natoms, double q2)
 {
-  if (natoms == 0) natoms = 1;   // avoid division by zero
-  double value = 2.0*q2*g_ewald/prd *
-    sqrt(1.0/(MY_PI*km*natoms)) *
-    exp(-MY_PI*MY_PI*km*km/(g_ewald*g_ewald*prd*prd));
-
+  g_ewald = 1.0/(sqrt(2.0) * gaussian_width[0]);
+  for (int i=0; i<Nspecies; i++) g_ewald = MAX(g_ewald, 1.0/(sqrt(2.0) * gaussian_width[i]));
+  //double value = 2.0*q2*g_ewald/prd *
+  //  sqrt(1.0/(MY_PI*km*natoms)) *
+  //  exp(-MY_PI*MY_PI*km*km/(g_ewald*g_ewald*prd*prd));
+  double value = exp(-MY_PI*MY_PI*km*km/(g_ewald*g_ewald*prd*prd));
   return value;
 }
 
+/* ---------------------------------------------------------------------- */
+void EwaldPANNA::compute_A_dot_v(double *v, double *M, double *A_dot_v)
+{
+  int i,j,k;
+  // extend size of per-atom arrays if necessary
+
+
+  if (atom->nmax > nmax) {
+       memory->destroy(ek);
+       memory->destroy3d_offset(cs,-kmax_created);
+       memory->destroy3d_offset(sn,-kmax_created);
+       nmax = atom->nmax;
+       memory->create(ek,nmax,3,"ewald:ek");
+       memory->create3d_offset(cs,-kmax,kmax,3,nmax,"ewald:cs");
+       memory->create3d_offset(sn,-kmax,kmax,3,nmax,"ewald:sn");
+       kmax_created = kmax;
+  }
+
+  double gauss_term, alpha2, sqk;
+  int nlocal = atom->nlocal;
+  double preu = 4.0*MY_PI/volume;
+  int *type = atom->type;
+  if (triclinic == 0)
+    eik_dot_r(v);
+  else
+    eik_dot_r_triclinic(v);
+  // loop over K-vectors and local atoms
+
+  double **x = atom->x;
+
+  int kx,ky,kz;
+  double cypz,sypz, coskr_i, sinkr_i;
+  const double qscale = force->qqrd2e;
+  //const double qscale = 14.39964547842567;
+  double vsum = 0.0;
+
+  MPI_Allreduce(sfacrl,sfacrl_all,kcount,MPI_DOUBLE,MPI_SUM,world);
+  MPI_Allreduce(sfacim,sfacim_all,kcount,MPI_DOUBLE,MPI_SUM,world);
+
+  for (int i = 0; i < nlocal; i++){
+    A_dot_v[i]=0.0;
+    M[i]=0.0;
+  }
+
+  // volume dependent term. It has contribution for each j
+  // It is a constant shift that contribute zero for neutral systems
+  //for (int i=0; i<nlocal; i++)vsum += v[i];
+  //for (int i = 0; i < nlocal; i++)A_dot_v[i] += qscale * MY_PI / (g_ewald * g_ewald * volume) * vsum; 
+//sum is done on the positive plane
+  for (k = 0; k < kcount; k++) {
+    kx = kxvecs[k];
+    ky = kyvecs[k];
+    kz = kzvecs[k];
+    sqk=preu/ug[k];
+    if (sqk<=gsqmx){
+      for (int i = 0; i < nlocal; i++) {
+        cypz = cs[ky][1][i]*cs[kz][2][i] - sn[ky][1][i]*sn[kz][2][i];
+        sypz = sn[ky][1][i]*cs[kz][2][i] + cs[ky][1][i]*sn[kz][2][i];
+        coskr_i = cs[kx][0][i]*cypz - sn[kx][0][i]*sypz;
+        sinkr_i = sn[kx][0][i]*cypz + cs[kx][0][i]*sypz;
+        double alpha2 = gaussian_width[type[i]-1] * gaussian_width[type[i]-1];
+        gauss_term = exp(-alpha2*sqk/4.0);
+        A_dot_v[i] += (2.0*qscale * gauss_term * ug[k] * (coskr_i*sfacrl_all[k] + sinkr_i*sfacim_all[k]));
+        M[i] += (2.0*qscale * gauss_term * gauss_term * ug[k]);
+
+      }
+    }
+
+
+  }
+}
+
 /* ----------------------------------------------------------------------
-   compute the Ewald long-range force, energy, virial
+   compute the EwaldPANNA long-range force, energy, virial
 ------------------------------------------------------------------------- */
 
-void Ewald::compute(int eflag, int vflag)
+void EwaldPANNA::compute(int eflag, int vflag)
 {
   int i,j,k;
 
@@ -389,22 +579,27 @@ void Ewald::compute(int eflag, int vflag)
 
   // partial structure factors on each processor
   // total structure factor by summing over procs
+  double *q = atom->q;
+  int *type = atom->type;
+  double **f = atom->f;
+  int nlocal = atom->nlocal;
+  double preu = 4.0*MY_PI/volume;
+  double gauss_term, alpha2, sqk;
 
   if (triclinic == 0)
-    eik_dot_r();
+    eik_dot_r(q);
   else
-    eik_dot_r_triclinic();
+    eik_dot_r_triclinic(q);
 
   MPI_Allreduce(sfacrl,sfacrl_all,kcount,MPI_DOUBLE,MPI_SUM,world);
   MPI_Allreduce(sfacim,sfacim_all,kcount,MPI_DOUBLE,MPI_SUM,world);
 
+  MPI_Allreduce(sfacrl_g,sfacrl_all_g,kcount,MPI_DOUBLE,MPI_SUM,world);
+  MPI_Allreduce(sfacim_g,sfacim_all_g,kcount,MPI_DOUBLE,MPI_SUM,world);
   // K-space portion of electric field
   // double loop over K-vectors and local atoms
   // perform per-atom calculations if needed
 
-  double **f = atom->f;
-  double *q = atom->q;
-  int nlocal = atom->nlocal;
 
   int kx,ky,kz;
   double cypz,sypz,exprl,expim,partial,partial_peratom;
@@ -419,30 +614,35 @@ void Ewald::compute(int eflag, int vflag)
     kx = kxvecs[k];
     ky = kyvecs[k];
     kz = kzvecs[k];
+    sqk = preu/ug[k];
+    //if (sqk>gsqmx)std::cout<<" greater "<< sqk<<"  "<< gsqmx<<std::endl;
 
     for (i = 0; i < nlocal; i++) {
+      alpha2 = gaussian_width[type[i]-1] * gaussian_width[type[i]-1];
+      gauss_term = exp(-alpha2*sqk/4);
       cypz = cs[ky][1][i]*cs[kz][2][i] - sn[ky][1][i]*sn[kz][2][i];
       sypz = sn[ky][1][i]*cs[kz][2][i] + cs[ky][1][i]*sn[kz][2][i];
       exprl = cs[kx][0][i]*cypz - sn[kx][0][i]*sypz;
       expim = sn[kx][0][i]*cypz + cs[kx][0][i]*sypz;
-      partial = expim*sfacrl_all[k] - exprl*sfacim_all[k];
-      ek[i][0] += partial*eg[k][0];
-      ek[i][1] += partial*eg[k][1];
-      ek[i][2] += partial*eg[k][2];
-
+      partial = (expim*sfacrl_all[k] - exprl*sfacim_all[k]);
+      ek[i][0] += gauss_term*partial*eg[k][0];
+      ek[i][1] += gauss_term*partial*eg[k][1];
+      ek[i][2] += gauss_term*partial*eg[k][2];
       if (evflag_atom) {
-        partial_peratom = exprl*sfacrl_all[k] + expim*sfacim_all[k];
+        partial_peratom = gauss_term*(exprl*sfacrl_all[k] + expim*sfacim_all[k]);
         if (eflag_atom) eatom[i] += q[i]*ug[k]*partial_peratom;
         if (vflag_atom)
           for (j = 0; j < 6; j++)
             vatom[i][j] += ug[k]*vg[k][j]*partial_peratom;
+            vatom[i][j] -= alpha2*ug[k]*vg_v3[k][j]*partial_peratom;
       }
     }
   }
 
   // convert E-field to force
 
-  const double qscale = qqrd2e * scale;
+  const double qscale = qqrd2e * scale; 
+  //const double qscale = 14.39964547842567;
 
   for (i = 0; i < nlocal; i++) {
     f[i][0] += qscale * q[i]*ek[i][0];
@@ -453,12 +653,13 @@ void Ewald::compute(int eflag, int vflag)
   // sum global energy across Kspace vevs and add in volume-dependent term
 
   if (eflag_global) {
-    for (k = 0; k < kcount; k++)
+    for (k = 0; k < kcount; k++){
       energy += ug[k] * (sfacrl_all[k]*sfacrl_all[k] +
                          sfacim_all[k]*sfacim_all[k]);
 
-    energy -= g_ewald*qsqsum/MY_PIS +
-      MY_PI2*qsum*qsum / (g_ewald*g_ewald*volume);
+    }
+//    energy -= g_ewald*qsqsum/MY_PIS + MY_PI2*qsum*qsum / (g_ewald*g_ewald*volume);
+//    energy -= g_ewald*qsqsum/MY_PIS;
     energy *= qscale;
   }
 
@@ -468,7 +669,8 @@ void Ewald::compute(int eflag, int vflag)
     double uk;
     for (k = 0; k < kcount; k++) {
       uk = ug[k] * (sfacrl_all[k]*sfacrl_all[k] + sfacim_all[k]*sfacim_all[k]);
-      for (j = 0; j < 6; j++) virial[j] += uk*vg[k][j];
+      double uk2 = ug[k] * (sfacrl_all_g[k]*sfacrl_all[k] + sfacim_all_g[k]*sfacim_all[k]);
+      for (j = 0; j < 6; j++) virial[j] += (uk*vg[k][j] - uk2 * vg_v3[k][j]);
     }
     for (j = 0; j < 6; j++) virial[j] *= qscale;
   }
@@ -479,8 +681,9 @@ void Ewald::compute(int eflag, int vflag)
   if (evflag_atom) {
     if (eflag_atom) {
       for (i = 0; i < nlocal; i++) {
-        eatom[i] -= g_ewald*q[i]*q[i]/MY_PIS + MY_PI2*q[i]*qsum /
-          (g_ewald*g_ewald*volume);
+      //  eatom[i] -= g_ewald*q[i]*q[i]/MY_PIS + MY_PI2*q[i]*qsum /
+       //   (g_ewald*g_ewald*volume);
+    //      eatom[i] -= g_ewald*q[i]*q[i]/MY_PIS;
         eatom[i] *= qscale;
       }
     }
@@ -489,7 +692,6 @@ void Ewald::compute(int eflag, int vflag)
       for (i = 0; i < nlocal; i++)
         for (j = 0; j < 6; j++) vatom[i][j] *= q[i]*qscale;
   }
-
   // 2d slab correction
 
   if (slabflag == 1) slabcorr();
@@ -497,17 +699,24 @@ void Ewald::compute(int eflag, int vflag)
 
 /* ---------------------------------------------------------------------- */
 
-void Ewald::eik_dot_r()
+void EwaldPANNA::eik_dot_r(double *v)
 {
-  int i,k,l,m,n,ic;
+  int i,k,l,m,n,nn,ic;
+  double cstr1_tmp,sstr1_tmp,cstr2_tmp,sstr2_tmp,cstr3_tmp,sstr3_tmp,cstr4_tmp,sstr4_tmp;
   double cstr1,sstr1,cstr2,sstr2,cstr3,sstr3,cstr4,sstr4;
+  double cstr1_g,sstr1_g,cstr2_g,sstr2_g,cstr3_g,sstr3_g,cstr4_g,sstr4_g;
+
   double sqk,clpm,slpm;
 
   double **x = atom->x;
-  double *q = atom->q;
+  //double *q = atom->q;
   int nlocal = atom->nlocal;
+  int *type = atom->type;
+  double gauss_term, alpha2;
+  double preu = 4.0*MY_PI/volume;
 
   n = 0;
+  nn = 0;
 
   // (k,0,0), (0,l,0), (0,0,m)
 
@@ -516,18 +725,35 @@ void Ewald::eik_dot_r()
     if (sqk <= gsqmx) {
       cstr1 = 0.0;
       sstr1 = 0.0;
+      //for virial computation
+      cstr1_g = 0.0;
+      sstr1_g = 0.0;
+
       for (i = 0; i < nlocal; i++) {
+	alpha2 = gaussian_width[type[i]-1]*gaussian_width[type[i]-1];
+        gauss_term = exp(-0.25 * alpha2 * sqk);
+
         cs[0][ic][i] = 1.0;
         sn[0][ic][i] = 0.0;
         cs[1][ic][i] = cos(unitk[ic]*x[i][ic]);
         sn[1][ic][i] = sin(unitk[ic]*x[i][ic]);
         cs[-1][ic][i] = cs[1][ic][i];
         sn[-1][ic][i] = -sn[1][ic][i];
-        cstr1 += q[i]*cs[1][ic][i];
-        sstr1 += q[i]*sn[1][ic][i];
+        cstr1_tmp = gauss_term * v[i]*cs[1][ic][i];
+        sstr1_tmp = gauss_term * v[i]*sn[1][ic][i];
+        
+	cstr1 += cstr1_tmp;
+	sstr1 += sstr1_tmp;
+
+	cstr1_g += alpha2*cstr1_tmp;
+        sstr1_g += alpha2*sstr1_tmp;
+
       }
       sfacrl[n] = cstr1;
       sfacim[n++] = sstr1;
+
+      sfacrl_g[nn] = cstr1_g;
+      sfacim_g[nn++] = sstr1_g;
     }
   }
 
@@ -537,18 +763,33 @@ void Ewald::eik_dot_r()
       if (sqk <= gsqmx) {
         cstr1 = 0.0;
         sstr1 = 0.0;
+
+	cstr1_g = 0.0;
+        sstr1_g = 0.0;
+
         for (i = 0; i < nlocal; i++) {
+          alpha2 = gaussian_width[type[i]-1]*gaussian_width[type[i]-1];
+          gauss_term = exp(-0.25 * alpha2 * sqk);
           cs[m][ic][i] = cs[m-1][ic][i]*cs[1][ic][i] -
             sn[m-1][ic][i]*sn[1][ic][i];
           sn[m][ic][i] = sn[m-1][ic][i]*cs[1][ic][i] +
             cs[m-1][ic][i]*sn[1][ic][i];
           cs[-m][ic][i] = cs[m][ic][i];
           sn[-m][ic][i] = -sn[m][ic][i];
-          cstr1 += q[i]*cs[m][ic][i];
-          sstr1 += q[i]*sn[m][ic][i];
+          cstr1_tmp = gauss_term*v[i]*cs[m][ic][i];
+          sstr1_tmp = gauss_term*v[i]*sn[m][ic][i];
+          
+	  cstr1 += cstr1_tmp;
+	  sstr1 += sstr1_tmp;
+
+          cstr1_g += alpha2*cstr1_tmp;
+          sstr1_g += alpha2*sstr1_tmp;
         }
         sfacrl[n] = cstr1;
         sfacim[n++] = sstr1;
+
+        sfacrl_g[nn] = cstr1;
+        sfacim_g[nn++] = sstr1;
       }
     }
   }
@@ -563,16 +804,41 @@ void Ewald::eik_dot_r()
         sstr1 = 0.0;
         cstr2 = 0.0;
         sstr2 = 0.0;
+
+	cstr1_g = 0.0;
+        sstr1_g = 0.0;
+        cstr2_g = 0.0;
+        sstr2_g = 0.0;
+
         for (i = 0; i < nlocal; i++) {
-          cstr1 += q[i]*(cs[k][0][i]*cs[l][1][i] - sn[k][0][i]*sn[l][1][i]);
-          sstr1 += q[i]*(sn[k][0][i]*cs[l][1][i] + cs[k][0][i]*sn[l][1][i]);
-          cstr2 += q[i]*(cs[k][0][i]*cs[l][1][i] + sn[k][0][i]*sn[l][1][i]);
-          sstr2 += q[i]*(sn[k][0][i]*cs[l][1][i] - cs[k][0][i]*sn[l][1][i]);
+	  alpha2 = gaussian_width[type[i]-1]*gaussian_width[type[i]-1];
+	  gauss_term = exp(-0.25 * alpha2 * sqk);
+          cstr1_tmp = gauss_term*v[i]*(cs[k][0][i]*cs[l][1][i] - sn[k][0][i]*sn[l][1][i]);
+          sstr1_tmp = gauss_term*v[i]*(sn[k][0][i]*cs[l][1][i] + cs[k][0][i]*sn[l][1][i]);
+          cstr2_tmp = gauss_term*v[i]*(cs[k][0][i]*cs[l][1][i] + sn[k][0][i]*sn[l][1][i]);
+          sstr2_tmp = gauss_term*v[i]*(sn[k][0][i]*cs[l][1][i] - cs[k][0][i]*sn[l][1][i]);
+          
+	  cstr1 += cstr1_tmp;
+	  sstr1 += sstr1_tmp;
+	  cstr2 += cstr2_tmp;
+	  sstr2 += sstr2_tmp;
+
+          cstr1_g += alpha2*cstr1_tmp;
+	  sstr1_g += alpha2*sstr1_tmp;
+	  cstr2_g += alpha2*cstr2_tmp;
+	  sstr2_g += alpha2*sstr2_tmp;
+
         }
         sfacrl[n] = cstr1;
         sfacim[n++] = sstr1;
         sfacrl[n] = cstr2;
         sfacim[n++] = sstr2;
+
+        sfacrl_g[nn] = cstr1_g;
+        sfacim_g[nn++] = sstr1_g;
+        sfacrl_g[nn] = cstr2_g;
+        sfacim_g[nn++] = sstr2_g;
+
       }
     }
   }
@@ -587,16 +853,42 @@ void Ewald::eik_dot_r()
         sstr1 = 0.0;
         cstr2 = 0.0;
         sstr2 = 0.0;
+
+        cstr1_g = 0.0;
+        sstr1_g = 0.0;
+        cstr2_g = 0.0;
+        sstr2_g = 0.0;
+
         for (i = 0; i < nlocal; i++) {
-          cstr1 += q[i]*(cs[l][1][i]*cs[m][2][i] - sn[l][1][i]*sn[m][2][i]);
-          sstr1 += q[i]*(sn[l][1][i]*cs[m][2][i] + cs[l][1][i]*sn[m][2][i]);
-          cstr2 += q[i]*(cs[l][1][i]*cs[m][2][i] + sn[l][1][i]*sn[m][2][i]);
-          sstr2 += q[i]*(sn[l][1][i]*cs[m][2][i] - cs[l][1][i]*sn[m][2][i]);
+	  alpha2 = gaussian_width[type[i]-1]*gaussian_width[type[i]-1];
+          gauss_term = exp(-0.25 * alpha2 * sqk);
+
+          cstr1_tmp = gauss_term*v[i]*(cs[l][1][i]*cs[m][2][i] - sn[l][1][i]*sn[m][2][i]);
+          sstr1_tmp = gauss_term*v[i]*(sn[l][1][i]*cs[m][2][i] + cs[l][1][i]*sn[m][2][i]);
+          cstr2_tmp = gauss_term*v[i]*(cs[l][1][i]*cs[m][2][i] + sn[l][1][i]*sn[m][2][i]);
+          sstr2_tmp = gauss_term*v[i]*(sn[l][1][i]*cs[m][2][i] - cs[l][1][i]*sn[m][2][i]);
+
+          cstr1 += cstr1_tmp;
+	  sstr1 += sstr1_tmp;
+	  cstr2 += cstr2_tmp;
+	  sstr2 += sstr2_tmp;
+
+          cstr1_g += alpha2*cstr1_tmp;
+	  sstr1_g += alpha2*sstr1_tmp;
+	  cstr2_g += alpha2*cstr2_tmp;
+	  sstr2_g += alpha2*sstr2_tmp;
+
         }
         sfacrl[n] = cstr1;
         sfacim[n++] = sstr1;
         sfacrl[n] = cstr2;
         sfacim[n++] = sstr2;
+
+        sfacrl_g[nn] = cstr1_g;
+        sfacim_g[nn++] = sstr1_g;
+        sfacrl_g[nn] = cstr2_g;
+        sfacim_g[nn++] = sstr2_g;
+
       }
     }
   }
@@ -611,16 +903,38 @@ void Ewald::eik_dot_r()
         sstr1 = 0.0;
         cstr2 = 0.0;
         sstr2 = 0.0;
+	cstr1_g = 0.0;
+        sstr1_g = 0.0;
+        cstr2_g = 0.0;
+        sstr2_g = 0.0;
+
         for (i = 0; i < nlocal; i++) {
-          cstr1 += q[i]*(cs[k][0][i]*cs[m][2][i] - sn[k][0][i]*sn[m][2][i]);
-          sstr1 += q[i]*(sn[k][0][i]*cs[m][2][i] + cs[k][0][i]*sn[m][2][i]);
-          cstr2 += q[i]*(cs[k][0][i]*cs[m][2][i] + sn[k][0][i]*sn[m][2][i]);
-          sstr2 += q[i]*(sn[k][0][i]*cs[m][2][i] - cs[k][0][i]*sn[m][2][i]);
+          alpha2 = gaussian_width[type[i]-1]*gaussian_width[type[i]-1];
+          gauss_term = exp(-0.25 * alpha2 * sqk);
+	
+          cstr1_tmp = gauss_term*v[i]*(cs[k][0][i]*cs[m][2][i] - sn[k][0][i]*sn[m][2][i]);
+          sstr1_tmp = gauss_term*v[i]*(sn[k][0][i]*cs[m][2][i] + cs[k][0][i]*sn[m][2][i]);
+          cstr2_tmp = gauss_term*v[i]*(cs[k][0][i]*cs[m][2][i] + sn[k][0][i]*sn[m][2][i]);
+          sstr2_tmp = gauss_term*v[i]*(sn[k][0][i]*cs[m][2][i] - cs[k][0][i]*sn[m][2][i]);
+          
+	  cstr1 += cstr1_tmp;
+	  sstr1 += sstr1_tmp;
+	  cstr2 += cstr2_tmp;
+	  sstr2 += sstr2_tmp;
+
+          cstr1_g += alpha2*cstr1_tmp;
+	  sstr1_g += alpha2*sstr1_tmp;
+	  cstr2_g += alpha2*cstr2_tmp;
+	  sstr2_g += alpha2*sstr2_tmp;
         }
         sfacrl[n] = cstr1;
         sfacim[n++] = sstr1;
         sfacrl[n] = cstr2;
         sfacim[n++] = sstr2;
+	sfacrl_g[nn] = cstr1_g;
+        sfacim_g[nn++] = sstr1_g;
+        sfacrl_g[nn] = cstr2_g;
+        sfacim_g[nn++] = sstr2_g;
       }
     }
   }
@@ -641,26 +955,59 @@ void Ewald::eik_dot_r()
           sstr3 = 0.0;
           cstr4 = 0.0;
           sstr4 = 0.0;
+
+	  cstr1_g = 0.0;
+          sstr1_g = 0.0;
+          cstr2_g = 0.0;
+          sstr2_g = 0.0;
+          cstr3_g = 0.0;
+          sstr3_g = 0.0;
+          cstr4_g = 0.0;
+          sstr4_g = 0.0;
+
           for (i = 0; i < nlocal; i++) {
+	    alpha2 = gaussian_width[type[i]-1]*gaussian_width[type[i]-1];
+            gauss_term = exp(-0.25 * alpha2 * sqk);
+
             clpm = cs[l][1][i]*cs[m][2][i] - sn[l][1][i]*sn[m][2][i];
             slpm = sn[l][1][i]*cs[m][2][i] + cs[l][1][i]*sn[m][2][i];
-            cstr1 += q[i]*(cs[k][0][i]*clpm - sn[k][0][i]*slpm);
-            sstr1 += q[i]*(sn[k][0][i]*clpm + cs[k][0][i]*slpm);
+            cstr1_tmp = gauss_term*v[i]*(cs[k][0][i]*clpm - sn[k][0][i]*slpm);
+            sstr1_tmp = gauss_term*v[i]*(sn[k][0][i]*clpm + cs[k][0][i]*slpm);
 
             clpm = cs[l][1][i]*cs[m][2][i] + sn[l][1][i]*sn[m][2][i];
             slpm = -sn[l][1][i]*cs[m][2][i] + cs[l][1][i]*sn[m][2][i];
-            cstr2 += q[i]*(cs[k][0][i]*clpm - sn[k][0][i]*slpm);
-            sstr2 += q[i]*(sn[k][0][i]*clpm + cs[k][0][i]*slpm);
+            cstr2_tmp= gauss_term*v[i]*(cs[k][0][i]*clpm - sn[k][0][i]*slpm);
+            sstr2_tmp= gauss_term*v[i]*(sn[k][0][i]*clpm + cs[k][0][i]*slpm);
 
             clpm = cs[l][1][i]*cs[m][2][i] + sn[l][1][i]*sn[m][2][i];
             slpm = sn[l][1][i]*cs[m][2][i] - cs[l][1][i]*sn[m][2][i];
-            cstr3 += q[i]*(cs[k][0][i]*clpm - sn[k][0][i]*slpm);
-            sstr3 += q[i]*(sn[k][0][i]*clpm + cs[k][0][i]*slpm);
+            cstr3_tmp = gauss_term*v[i]*(cs[k][0][i]*clpm - sn[k][0][i]*slpm);
+            sstr3_tmp = gauss_term*v[i]*(sn[k][0][i]*clpm + cs[k][0][i]*slpm);
 
             clpm = cs[l][1][i]*cs[m][2][i] - sn[l][1][i]*sn[m][2][i];
             slpm = -sn[l][1][i]*cs[m][2][i] - cs[l][1][i]*sn[m][2][i];
-            cstr4 += q[i]*(cs[k][0][i]*clpm - sn[k][0][i]*slpm);
-            sstr4 += q[i]*(sn[k][0][i]*clpm + cs[k][0][i]*slpm);
+            cstr4_tmp = gauss_term*v[i]*(cs[k][0][i]*clpm - sn[k][0][i]*slpm);
+            sstr4_tmp = gauss_term*v[i]*(sn[k][0][i]*clpm + cs[k][0][i]*slpm);
+
+          cstr1 += cstr1_tmp;
+	  sstr1 += sstr1_tmp;
+	  cstr2 += cstr2_tmp;
+	  sstr2 += sstr2_tmp;
+          cstr3 += cstr3_tmp;
+	  sstr3 += sstr3_tmp;
+	  cstr4 += cstr4_tmp;
+	  sstr4 += sstr4_tmp;
+
+          cstr1_g += alpha2*cstr1_tmp;
+	  sstr1_g += alpha2*sstr1_tmp;
+	  cstr2_g += alpha2*cstr2_tmp;
+	  sstr2_g += alpha2*sstr2_tmp;
+          cstr3_g += alpha2*cstr3_tmp;
+	  sstr3_g += alpha2*sstr3_tmp;
+	  cstr4_g += alpha2*cstr4_tmp;
+	  sstr4_g += alpha2*sstr4_tmp;
+
+
           }
           sfacrl[n] = cstr1;
           sfacim[n++] = sstr1;
@@ -670,6 +1017,15 @@ void Ewald::eik_dot_r()
           sfacim[n++] = sstr3;
           sfacrl[n] = cstr4;
           sfacim[n++] = sstr4;
+
+          sfacrl_g[nn] = cstr1_g;
+          sfacim_g[nn++] = sstr1_g;
+          sfacrl_g[nn] = cstr2_g;
+          sfacim_g[nn++] = sstr2_g;
+          sfacrl_g[nn] = cstr3_g;
+          sfacim_g[nn++] = sstr3_g;
+          sfacrl_g[nn] = cstr4_g;
+          sfacim_g[nn++] = sstr4_g;
         }
       }
     }
@@ -678,15 +1034,20 @@ void Ewald::eik_dot_r()
 
 /* ---------------------------------------------------------------------- */
 
-void Ewald::eik_dot_r_triclinic()
+void EwaldPANNA::eik_dot_r_triclinic(double *v)
 {
   int i,k,l,m,n,ic;
   double cstr1,sstr1;
+  double cstr1_tmp,sstr1_tmp;
+  double cstr1_g,sstr1_g;
   double sqk,clpm,slpm;
 
   double **x = atom->x;
-  double *q = atom->q;
+  //double *q = atom->q;
   int nlocal = atom->nlocal;
+  double gauss_term, alpha2;
+  int *type = atom->type;
+  double preu = 4.0*MY_PI/volume;
 
   double unitk_lamda[3];
 
@@ -739,24 +1100,40 @@ void Ewald::eik_dot_r_triclinic()
     k = kxvecs[n];
     l = kyvecs[n];
     m = kzvecs[n];
+    sqk = preu / ug[n];
+
     cstr1 = 0.0;
     sstr1 = 0.0;
+
+    cstr1_g = 0.0;
+    sstr1_g = 0.0;
     for (i = 0; i < nlocal; i++) {
+      alpha2 = gaussian_width[type[i]-1]*gaussian_width[type[i]-1];
+      gauss_term = exp(-0.25*alpha2*sqk);
+      
       clpm = cs[l][1][i]*cs[m][2][i] - sn[l][1][i]*sn[m][2][i];
       slpm = sn[l][1][i]*cs[m][2][i] + cs[l][1][i]*sn[m][2][i];
-      cstr1 += q[i]*(cs[k][0][i]*clpm - sn[k][0][i]*slpm);
-      sstr1 += q[i]*(sn[k][0][i]*clpm + cs[k][0][i]*slpm);
+      cstr1_tmp = gauss_term*v[i]*(cs[k][0][i]*clpm - sn[k][0][i]*slpm);
+      sstr1_tmp = gauss_term*v[i]*(sn[k][0][i]*clpm + cs[k][0][i]*slpm);
+
+      cstr1 += cstr1_tmp;
+      sstr1 += sstr1_tmp;
+      cstr1_g += alpha2*cstr1_tmp;
+      sstr1_g += alpha2*sstr1_tmp;
     }
     sfacrl[n] = cstr1;
     sfacim[n] = sstr1;
+    sfacrl_g[n] = cstr1_g;
+    sfacim_g[n] = sstr1_g;
   }
 }
 
+
 /* ----------------------------------------------------------------------
-   pre-compute coefficients for each Ewald K-vector
+   pre-compute coefficients for each EwaldPANNA K-vector
 ------------------------------------------------------------------------- */
 
-void Ewald::coeffs()
+void EwaldPANNA::coeffs()
 {
   int k,l,m;
   double sqk,vterm;
@@ -774,17 +1151,25 @@ void Ewald::coeffs()
       kxvecs[kcount] = m;
       kyvecs[kcount] = 0;
       kzvecs[kcount] = 0;
-      ug[kcount] = preu*exp(-0.25*sqk*g_ewald_sq_inv)/sqk;
+      ug[kcount] = preu/sqk;
       eg[kcount][0] = 2.0*unitk[0]*m*ug[kcount];
       eg[kcount][1] = 0.0;
       eg[kcount][2] = 0.0;
-      vterm = -2.0*(1.0/sqk + 0.25*g_ewald_sq_inv);
+      vterm = -2.0/sqk;
       vg[kcount][0] = 1.0 + vterm*(unitk[0]*m)*(unitk[0]*m);
       vg[kcount][1] = 1.0;
       vg[kcount][2] = 1.0;
       vg[kcount][3] = 0.0;
       vg[kcount][4] = 0.0;
       vg[kcount][5] = 0.0;
+       
+      vg[kcount][0] = (unitk[0]*m)*(unitk[0]*m);
+      vg[kcount][1] = 0.0;
+      vg[kcount][2] = 0.0;
+      vg[kcount][3] = 0.0;
+      vg[kcount][4] = 0.0;
+      vg[kcount][5] = 0.0;
+
       kcount++;
     }
     sqk = (m*unitk[1]) * (m*unitk[1]);
@@ -792,17 +1177,24 @@ void Ewald::coeffs()
       kxvecs[kcount] = 0;
       kyvecs[kcount] = m;
       kzvecs[kcount] = 0;
-      ug[kcount] = preu*exp(-0.25*sqk*g_ewald_sq_inv)/sqk;
+      ug[kcount] = preu/sqk;
       eg[kcount][0] = 0.0;
       eg[kcount][1] = 2.0*unitk[1]*m*ug[kcount];
       eg[kcount][2] = 0.0;
-      vterm = -2.0*(1.0/sqk + 0.25*g_ewald_sq_inv);
+      vterm = -2.0/sqk;
       vg[kcount][0] = 1.0;
       vg[kcount][1] = 1.0 + vterm*(unitk[1]*m)*(unitk[1]*m);
       vg[kcount][2] = 1.0;
       vg[kcount][3] = 0.0;
       vg[kcount][4] = 0.0;
       vg[kcount][5] = 0.0;
+
+      vg_v3[kcount][0] = 0.0;
+      vg_v3[kcount][1] = (unitk[1]*m)*(unitk[1]*m);
+      vg_v3[kcount][2] = 0.0;
+      vg_v3[kcount][3] = 0.0;
+      vg_v3[kcount][4] = 0.0;
+      vg_v3[kcount][5] = 0.0;
       kcount++;
     }
     sqk = (m*unitk[2]) * (m*unitk[2]);
@@ -810,17 +1202,25 @@ void Ewald::coeffs()
       kxvecs[kcount] = 0;
       kyvecs[kcount] = 0;
       kzvecs[kcount] = m;
-      ug[kcount] = preu*exp(-0.25*sqk*g_ewald_sq_inv)/sqk;
+      ug[kcount] = preu/sqk;
       eg[kcount][0] = 0.0;
       eg[kcount][1] = 0.0;
       eg[kcount][2] = 2.0*unitk[2]*m*ug[kcount];
-      vterm = -2.0*(1.0/sqk + 0.25*g_ewald_sq_inv);
+      vterm = -2.0/sqk;
       vg[kcount][0] = 1.0;
       vg[kcount][1] = 1.0;
       vg[kcount][2] = 1.0 + vterm*(unitk[2]*m)*(unitk[2]*m);
       vg[kcount][3] = 0.0;
       vg[kcount][4] = 0.0;
       vg[kcount][5] = 0.0;
+
+      vg_v3[kcount][0] = 0.0;
+      vg_v3[kcount][1] = 0.0;
+      vg_v3[kcount][2] = (unitk[2]*m)*(unitk[2]*m);
+      vg_v3[kcount][3] = 0.0;
+      vg_v3[kcount][4] = 0.0;
+      vg_v3[kcount][5] = 0.0;
+
       kcount++;
     }
   }
@@ -834,23 +1234,31 @@ void Ewald::coeffs()
         kxvecs[kcount] = k;
         kyvecs[kcount] = l;
         kzvecs[kcount] = 0;
-        ug[kcount] = preu*exp(-0.25*sqk*g_ewald_sq_inv)/sqk;
+        ug[kcount] = preu/sqk;
         eg[kcount][0] = 2.0*unitk[0]*k*ug[kcount];
         eg[kcount][1] = 2.0*unitk[1]*l*ug[kcount];
         eg[kcount][2] = 0.0;
-        vterm = -2.0*(1.0/sqk + 0.25*g_ewald_sq_inv);
+        vterm = -2.0/sqk;
         vg[kcount][0] = 1.0 + vterm*(unitk[0]*k)*(unitk[0]*k);
         vg[kcount][1] = 1.0 + vterm*(unitk[1]*l)*(unitk[1]*l);
         vg[kcount][2] = 1.0;
         vg[kcount][3] = vterm*unitk[0]*k*unitk[1]*l;
         vg[kcount][4] = 0.0;
         vg[kcount][5] = 0.0;
+
+        vg_v3[kcount][0] = (unitk[0]*k)*(unitk[0]*k);
+        vg_v3[kcount][1] = (unitk[1]*l)*(unitk[1]*l);
+        vg_v3[kcount][2] = 0.0;
+        vg_v3[kcount][3] = unitk[0]*k*unitk[1]*l;
+        vg_v3[kcount][4] = 0.0;
+        vg_v3[kcount][5] = 0.0;
+
         kcount++;
 
         kxvecs[kcount] = k;
         kyvecs[kcount] = -l;
         kzvecs[kcount] = 0;
-        ug[kcount] = preu*exp(-0.25*sqk*g_ewald_sq_inv)/sqk;
+        ug[kcount] = preu/sqk;
         eg[kcount][0] = 2.0*unitk[0]*k*ug[kcount];
         eg[kcount][1] = -2.0*unitk[1]*l*ug[kcount];
         eg[kcount][2] = 0.0;
@@ -860,7 +1268,14 @@ void Ewald::coeffs()
         vg[kcount][3] = -vterm*unitk[0]*k*unitk[1]*l;
         vg[kcount][4] = 0.0;
         vg[kcount][5] = 0.0;
-        kcount++;
+
+        vg_v3[kcount][0] = (unitk[0]*k)*(unitk[0]*k);
+        vg_v3[kcount][1] = (unitk[1]*l)*(unitk[1]*l);
+        vg_v3[kcount][2] = 0.0;
+        vg_v3[kcount][3] = unitk[0]*k*unitk[1]*l;
+        vg_v3[kcount][4] = 0.0;
+        vg_v3[kcount][5] = 0.0;
+        kcount++;;
       }
     }
   }
@@ -874,23 +1289,30 @@ void Ewald::coeffs()
         kxvecs[kcount] = 0;
         kyvecs[kcount] = l;
         kzvecs[kcount] = m;
-        ug[kcount] = preu*exp(-0.25*sqk*g_ewald_sq_inv)/sqk;
+        ug[kcount] = preu/sqk;
         eg[kcount][0] =  0.0;
         eg[kcount][1] =  2.0*unitk[1]*l*ug[kcount];
         eg[kcount][2] =  2.0*unitk[2]*m*ug[kcount];
-        vterm = -2.0*(1.0/sqk + 0.25*g_ewald_sq_inv);
+        vterm = -2.0/sqk;
         vg[kcount][0] = 1.0;
         vg[kcount][1] = 1.0 + vterm*(unitk[1]*l)*(unitk[1]*l);
         vg[kcount][2] = 1.0 + vterm*(unitk[2]*m)*(unitk[2]*m);
         vg[kcount][3] = 0.0;
         vg[kcount][4] = 0.0;
         vg[kcount][5] = vterm*unitk[1]*l*unitk[2]*m;
+
+        vg_v3[kcount][0] = 0.0;
+        vg_v3[kcount][1] =(unitk[1]*l)*(unitk[1]*l);
+        vg_v3[kcount][2] = (unitk[2]*m)*(unitk[2]*m);
+        vg_v3[kcount][3] = 0.0;
+        vg_v3[kcount][4] = 0.0;
+        vg_v3[kcount][5] = unitk[1]*l*unitk[2]*m;
         kcount++;
 
         kxvecs[kcount] = 0;
         kyvecs[kcount] = l;
         kzvecs[kcount] = -m;
-        ug[kcount] = preu*exp(-0.25*sqk*g_ewald_sq_inv)/sqk;
+        ug[kcount] = preu/sqk;
         eg[kcount][0] =  0.0;
         eg[kcount][1] =  2.0*unitk[1]*l*ug[kcount];
         eg[kcount][2] = -2.0*unitk[2]*m*ug[kcount];
@@ -900,6 +1322,13 @@ void Ewald::coeffs()
         vg[kcount][3] = 0.0;
         vg[kcount][4] = 0.0;
         vg[kcount][5] = -vterm*unitk[1]*l*unitk[2]*m;
+
+        vg_v3[kcount][0] = 0.0;
+        vg_v3[kcount][1] = (unitk[1]*l)*(unitk[1]*l);
+        vg_v3[kcount][2] = (unitk[2]*m)*(unitk[2]*m);
+        vg_v3[kcount][3] = 0.0;
+        vg_v3[kcount][4] = 0.0;
+        vg_v3[kcount][5] = unitk[1]*l*unitk[2]*m;
         kcount++;
       }
     }
@@ -914,23 +1343,31 @@ void Ewald::coeffs()
         kxvecs[kcount] = k;
         kyvecs[kcount] = 0;
         kzvecs[kcount] = m;
-        ug[kcount] = preu*exp(-0.25*sqk*g_ewald_sq_inv)/sqk;
+        ug[kcount] = preu/sqk;
         eg[kcount][0] =  2.0*unitk[0]*k*ug[kcount];
         eg[kcount][1] =  0.0;
         eg[kcount][2] =  2.0*unitk[2]*m*ug[kcount];
-        vterm = -2.0*(1.0/sqk + 0.25*g_ewald_sq_inv);
+        vterm = -2.0/sqk;
         vg[kcount][0] = 1.0 + vterm*(unitk[0]*k)*(unitk[0]*k);
         vg[kcount][1] = 1.0;
         vg[kcount][2] = 1.0 + vterm*(unitk[2]*m)*(unitk[2]*m);
         vg[kcount][3] = 0.0;
         vg[kcount][4] = vterm*unitk[0]*k*unitk[2]*m;
         vg[kcount][5] = 0.0;
+
+	vg_v3[kcount][0] = (unitk[0]*k)*(unitk[0]*k);
+        vg_v3[kcount][1] = 0.0;
+        vg_v3[kcount][2] = (unitk[2]*m)*(unitk[2]*m);
+        vg_v3[kcount][3] = 0.0;
+        vg_v3[kcount][4] = unitk[0]*k*unitk[2]*m;
+        vg_v3[kcount][5] = 0.0;
+
         kcount++;
 
         kxvecs[kcount] = k;
         kyvecs[kcount] = 0;
         kzvecs[kcount] = -m;
-        ug[kcount] = preu*exp(-0.25*sqk*g_ewald_sq_inv)/sqk;
+        ug[kcount] = preu/sqk;
         eg[kcount][0] =  2.0*unitk[0]*k*ug[kcount];
         eg[kcount][1] =  0.0;
         eg[kcount][2] = -2.0*unitk[2]*m*ug[kcount];
@@ -940,6 +1377,14 @@ void Ewald::coeffs()
         vg[kcount][3] = 0.0;
         vg[kcount][4] = -vterm*unitk[0]*k*unitk[2]*m;
         vg[kcount][5] = 0.0;
+        
+	vg_v3[kcount][0] = (unitk[0]*k)*(unitk[0]*k);
+        vg_v3[kcount][1] = 0.0;
+        vg_v3[kcount][2] = (unitk[2]*m)*(unitk[2]*m);
+        vg_v3[kcount][3] = 0.0;
+        vg_v3[kcount][4] = unitk[0]*k*unitk[2]*m;
+        vg_v3[kcount][5] = 0.0;
+
         kcount++;
       }
     }
@@ -956,23 +1401,31 @@ void Ewald::coeffs()
           kxvecs[kcount] = k;
           kyvecs[kcount] = l;
           kzvecs[kcount] = m;
-          ug[kcount] = preu*exp(-0.25*sqk*g_ewald_sq_inv)/sqk;
+          ug[kcount] = preu/sqk;
           eg[kcount][0] = 2.0*unitk[0]*k*ug[kcount];
           eg[kcount][1] = 2.0*unitk[1]*l*ug[kcount];
           eg[kcount][2] = 2.0*unitk[2]*m*ug[kcount];
-          vterm = -2.0*(1.0/sqk + 0.25*g_ewald_sq_inv);
+          vterm = -2.0/sqk;
           vg[kcount][0] = 1.0 + vterm*(unitk[0]*k)*(unitk[0]*k);
           vg[kcount][1] = 1.0 + vterm*(unitk[1]*l)*(unitk[1]*l);
           vg[kcount][2] = 1.0 + vterm*(unitk[2]*m)*(unitk[2]*m);
           vg[kcount][3] = vterm*unitk[0]*k*unitk[1]*l;
           vg[kcount][4] = vterm*unitk[0]*k*unitk[2]*m;
           vg[kcount][5] = vterm*unitk[1]*l*unitk[2]*m;
+
+          vg_v3[kcount][0] = (unitk[0]*k)*(unitk[0]*k);
+          vg_v3[kcount][1] = (unitk[1]*l)*(unitk[1]*l);
+          vg_v3[kcount][2] = (unitk[2]*m)*(unitk[2]*m);
+          vg_v3[kcount][3] = unitk[0]*k*unitk[1]*l;
+          vg_v3[kcount][4] = unitk[0]*k*unitk[2]*m;
+          vg_v3[kcount][5] = unitk[1]*l*unitk[2]*m;
+
           kcount++;
 
           kxvecs[kcount] = k;
           kyvecs[kcount] = -l;
           kzvecs[kcount] = m;
-          ug[kcount] = preu*exp(-0.25*sqk*g_ewald_sq_inv)/sqk;
+          ug[kcount] = preu/sqk;
           eg[kcount][0] = 2.0*unitk[0]*k*ug[kcount];
           eg[kcount][1] = -2.0*unitk[1]*l*ug[kcount];
           eg[kcount][2] = 2.0*unitk[2]*m*ug[kcount];
@@ -982,12 +1435,19 @@ void Ewald::coeffs()
           vg[kcount][3] = -vterm*unitk[0]*k*unitk[1]*l;
           vg[kcount][4] = vterm*unitk[0]*k*unitk[2]*m;
           vg[kcount][5] = -vterm*unitk[1]*l*unitk[2]*m;
+
+          vg_v3[kcount][0] = (unitk[0]*k)*(unitk[0]*k);
+          vg_v3[kcount][1] = (unitk[1]*l)*(unitk[1]*l);
+          vg_v3[kcount][2] = (unitk[2]*m)*(unitk[2]*m);
+          vg_v3[kcount][3] = unitk[0]*k*unitk[1]*l;
+          vg_v3[kcount][4] = unitk[0]*k*unitk[2]*m;
+          vg_v3[kcount][5] = unitk[1]*l*unitk[2]*m;
           kcount++;
 
           kxvecs[kcount] = k;
           kyvecs[kcount] = l;
           kzvecs[kcount] = -m;
-          ug[kcount] = preu*exp(-0.25*sqk*g_ewald_sq_inv)/sqk;
+          ug[kcount] = preu/sqk;
           eg[kcount][0] = 2.0*unitk[0]*k*ug[kcount];
           eg[kcount][1] = 2.0*unitk[1]*l*ug[kcount];
           eg[kcount][2] = -2.0*unitk[2]*m*ug[kcount];
@@ -997,12 +1457,19 @@ void Ewald::coeffs()
           vg[kcount][3] = vterm*unitk[0]*k*unitk[1]*l;
           vg[kcount][4] = -vterm*unitk[0]*k*unitk[2]*m;
           vg[kcount][5] = -vterm*unitk[1]*l*unitk[2]*m;
+
+          vg_v3[kcount][0] = (unitk[0]*k)*(unitk[0]*k);
+          vg_v3[kcount][1] = (unitk[1]*l)*(unitk[1]*l);
+          vg_v3[kcount][2] = (unitk[2]*m)*(unitk[2]*m);
+          vg_v3[kcount][3] = unitk[0]*k*unitk[1]*l;
+          vg_v3[kcount][4] = unitk[0]*k*unitk[2]*m;
+          vg_v3[kcount][5] = unitk[1]*l*unitk[2]*m;
           kcount++;
 
           kxvecs[kcount] = k;
           kyvecs[kcount] = -l;
           kzvecs[kcount] = -m;
-          ug[kcount] = preu*exp(-0.25*sqk*g_ewald_sq_inv)/sqk;
+          ug[kcount] = preu/sqk;
           eg[kcount][0] = 2.0*unitk[0]*k*ug[kcount];
           eg[kcount][1] = -2.0*unitk[1]*l*ug[kcount];
           eg[kcount][2] = -2.0*unitk[2]*m*ug[kcount];
@@ -1012,6 +1479,14 @@ void Ewald::coeffs()
           vg[kcount][3] = -vterm*unitk[0]*k*unitk[1]*l;
           vg[kcount][4] = -vterm*unitk[0]*k*unitk[2]*m;
           vg[kcount][5] = vterm*unitk[1]*l*unitk[2]*m;
+
+          vg_v3[kcount][0] = (unitk[0]*k)*(unitk[0]*k);
+          vg_v3[kcount][1] = (unitk[1]*l)*(unitk[1]*l);
+          vg_v3[kcount][2] = (unitk[2]*m)*(unitk[2]*m);
+          vg_v3[kcount][3] = unitk[0]*k*unitk[1]*l;
+          vg_v3[kcount][4] = unitk[0]*k*unitk[2]*m;
+          vg_v3[kcount][5] = unitk[1]*l*unitk[2]*m;
+
           kcount++;
         }
       }
@@ -1020,11 +1495,11 @@ void Ewald::coeffs()
 }
 
 /* ----------------------------------------------------------------------
-   pre-compute coefficients for each Ewald K-vector for a triclinic
+   pre-compute coefficients for each EwaldPANNA K-vector for a triclinic
    system
 ------------------------------------------------------------------------- */
 
-void Ewald::coeffs_triclinic()
+void EwaldPANNA::coeffs_triclinic()
 {
   int k,l,m;
   double sqk,vterm;
@@ -1051,17 +1526,24 @@ void Ewald::coeffs_triclinic()
           kxvecs[kcount] = k;
           kyvecs[kcount] = l;
           kzvecs[kcount] = m;
-          ug[kcount] = preu*exp(-0.25*sqk*g_ewald_sq_inv)/sqk;
+          ug[kcount] = preu/sqk;
           eg[kcount][0] = 2.0*unitk_lamda[0]*ug[kcount];
           eg[kcount][1] = 2.0*unitk_lamda[1]*ug[kcount];
           eg[kcount][2] = 2.0*unitk_lamda[2]*ug[kcount];
-          vterm = -2.0*(1.0/sqk + 0.25*g_ewald_sq_inv);
+          vterm = -2.0/sqk;
           vg[kcount][0] = 1.0 + vterm*unitk_lamda[0]*unitk_lamda[0];
           vg[kcount][1] = 1.0 + vterm*unitk_lamda[1]*unitk_lamda[1];
           vg[kcount][2] = 1.0 + vterm*unitk_lamda[2]*unitk_lamda[2];
           vg[kcount][3] = vterm*unitk_lamda[0]*unitk_lamda[1];
           vg[kcount][4] = vterm*unitk_lamda[0]*unitk_lamda[2];
           vg[kcount][5] = vterm*unitk_lamda[1]*unitk_lamda[2];
+
+          vg_v3[kcount][0] = unitk_lamda[0]*unitk_lamda[0];
+          vg_v3[kcount][1] = unitk_lamda[1]*unitk_lamda[1];
+          vg_v3[kcount][2] = unitk_lamda[2]*unitk_lamda[2];
+          vg_v3[kcount][3] = unitk_lamda[0]*unitk_lamda[1];
+          vg_v3[kcount][4] = unitk_lamda[0]*unitk_lamda[2];
+          vg_v3[kcount][5] = unitk_lamda[1]*unitk_lamda[2];
           kcount++;
         }
       }
@@ -1081,17 +1563,24 @@ void Ewald::coeffs_triclinic()
         kxvecs[kcount] = 0;
         kyvecs[kcount] = l;
         kzvecs[kcount] = m;
-        ug[kcount] = preu*exp(-0.25*sqk*g_ewald_sq_inv)/sqk;
+        ug[kcount] = preu/sqk;
         eg[kcount][0] =  0.0;
         eg[kcount][1] =  2.0*unitk_lamda[1]*ug[kcount];
         eg[kcount][2] =  2.0*unitk_lamda[2]*ug[kcount];
-        vterm = -2.0*(1.0/sqk + 0.25*g_ewald_sq_inv);
+        vterm = -2.0/sqk;
         vg[kcount][0] = 1.0;
         vg[kcount][1] = 1.0 + vterm*unitk_lamda[1]*unitk_lamda[1];
         vg[kcount][2] = 1.0 + vterm*unitk_lamda[2]*unitk_lamda[2];
         vg[kcount][3] = 0.0;
         vg[kcount][4] = 0.0;
         vg[kcount][5] = vterm*unitk_lamda[1]*unitk_lamda[2];
+
+        vg_v3[kcount][0] = 0.0;
+        vg_v3[kcount][1] = unitk_lamda[1]*unitk_lamda[1];
+        vg_v3[kcount][2] = unitk_lamda[2]*unitk_lamda[2];
+        vg_v3[kcount][3] = 0.0;
+        vg_v3[kcount][4] = 0.0;
+        vg_v3[kcount][5] = unitk_lamda[1]*unitk_lamda[2];
         kcount++;
       }
     }
@@ -1109,17 +1598,24 @@ void Ewald::coeffs_triclinic()
       kxvecs[kcount] = 0;
       kyvecs[kcount] = 0;
       kzvecs[kcount] = m;
-      ug[kcount] = preu*exp(-0.25*sqk*g_ewald_sq_inv)/sqk;
+      ug[kcount] = preu/sqk;
       eg[kcount][0] = 0.0;
       eg[kcount][1] = 0.0;
       eg[kcount][2] = 2.0*unitk_lamda[2]*ug[kcount];
-      vterm = -2.0*(1.0/sqk + 0.25*g_ewald_sq_inv);
+      vterm = -2.0/sqk;
       vg[kcount][0] = 1.0;
       vg[kcount][1] = 1.0;
       vg[kcount][2] = 1.0 + vterm*unitk_lamda[2]*unitk_lamda[2];
       vg[kcount][3] = 0.0;
       vg[kcount][4] = 0.0;
       vg[kcount][5] = 0.0;
+
+      vg_v3[kcount][0] = 0.0;
+      vg_v3[kcount][1] = 0.0;
+      vg_v3[kcount][2] = unitk_lamda[2]*unitk_lamda[2];
+      vg_v3[kcount][3] = 0.0;
+      vg_v3[kcount][4] = 0.0;
+      vg_v3[kcount][5] = 0.0;
       kcount++;
     }
   }
@@ -1129,7 +1625,7 @@ void Ewald::coeffs_triclinic()
    allocate memory that depends on # of K-vectors
 ------------------------------------------------------------------------- */
 
-void Ewald::allocate()
+void EwaldPANNA::allocate()
 {
   kxvecs = new int[kmax3d];
   kyvecs = new int[kmax3d];
@@ -1138,18 +1634,24 @@ void Ewald::allocate()
   ug = new double[kmax3d];
   memory->create(eg,kmax3d,3,"ewald:eg");
   memory->create(vg,kmax3d,6,"ewald:vg");
+  memory->create(vg_v3,kmax3d,6,"ewald:vg_v3");
 
   sfacrl = new double[kmax3d];
   sfacim = new double[kmax3d];
   sfacrl_all = new double[kmax3d];
   sfacim_all = new double[kmax3d];
+  sfacrl_g = new double[kmax3d];
+  sfacim_g = new double[kmax3d];
+  sfacrl_all_g = new double[kmax3d];
+  sfacim_all_g = new double[kmax3d];
+
 }
 
 /* ----------------------------------------------------------------------
    deallocate memory that depends on # of K-vectors
 ------------------------------------------------------------------------- */
 
-void Ewald::deallocate()
+void EwaldPANNA::deallocate()
 {
   delete [] kxvecs;
   delete [] kyvecs;
@@ -1158,28 +1660,34 @@ void Ewald::deallocate()
   delete [] ug;
   memory->destroy(eg);
   memory->destroy(vg);
+  memory->destroy(vg_v3);
 
   delete [] sfacrl;
   delete [] sfacim;
   delete [] sfacrl_all;
   delete [] sfacim_all;
+
+  delete [] sfacrl_g;
+  delete [] sfacim_g;
+  delete [] sfacrl_all_g;
+  delete [] sfacim_all_g;
 }
 
 /* ----------------------------------------------------------------------
    Slab-geometry correction term to dampen inter-slab interactions between
-   periodically repeating slabs.  Yields good approximation to 2D Ewald if
+   periodically repeating slabs.  Yields good approximation to 2D EwaldPANNA if
    adequate empty space is left between repeating slabs (J. Chem. Phys.
    111, 3155).  Slabs defined here to be parallel to the xy plane. Also
    extended to non-neutral systems (J. Chem. Phys. 131, 094107).
 ------------------------------------------------------------------------- */
 
-void Ewald::slabcorr()
+void EwaldPANNA::slabcorr()
 {
   // compute local contribution to global dipole moment
 
   double *q = atom->q;
   double **x = atom->x;
-  double zprd_slab = domain->zprd*slab_volfactor;
+  double zprd = domain->zprd;
   int nlocal = atom->nlocal;
 
   double dipole = 0.0;
@@ -1208,7 +1716,7 @@ void Ewald::slabcorr()
   // compute corrections
 
   const double e_slabcorr = MY_2PI*(dipole_all*dipole_all -
-    qsum*dipole_r2 - qsum*qsum*zprd_slab*zprd_slab/12.0)/volume;
+    qsum*dipole_r2 - qsum*qsum*zprd*zprd/12.0)/volume;
   const double qscale = qqrd2e * scale;
 
   if (eflag_global) energy += qscale * e_slabcorr;
@@ -1219,7 +1727,7 @@ void Ewald::slabcorr()
     double efact = qscale * MY_2PI/volume;
     for (int i = 0; i < nlocal; i++)
       eatom[i] += efact * q[i]*(x[i][2]*dipole_all - 0.5*(dipole_r2 +
-        qsum*x[i][2]*x[i][2]) - qsum*zprd_slab*zprd_slab/12.0);
+        qsum*x[i][2]*x[i][2]) - qsum*zprd*zprd/12.0);
   }
 
   // add on force corrections
@@ -1234,13 +1742,13 @@ void Ewald::slabcorr()
    memory usage of local arrays
 ------------------------------------------------------------------------- */
 
-double Ewald::memory_usage()
+double EwaldPANNA::memory_usage()
 {
   double bytes = 3 * kmax3d * sizeof(int);
-  bytes += (double)(1 + 3 + 6) * kmax3d * sizeof(double);
-  bytes += (double)4 * kmax3d * sizeof(double);
-  bytes += (double)nmax*3 * sizeof(double);
-  bytes += (double)2 * (2*kmax+1)*3*nmax * sizeof(double);
+  bytes += (1 + 3 + 6) * kmax3d * sizeof(double);
+  bytes += 4 * kmax3d * sizeof(double);
+  bytes += nmax*3 * sizeof(double);
+  bytes += 2 * (2*kmax+1)*3*nmax * sizeof(double);
   return bytes;
 }
 
@@ -1249,10 +1757,10 @@ double Ewald::memory_usage()
  ------------------------------------------------------------------------- */
 
 /* ----------------------------------------------------------------------
-   compute the Ewald total long-range force and energy for groups A and B
+   compute the EwaldPANNA total long-range force and energy for groups A and B
  ------------------------------------------------------------------------- */
 
-void Ewald::compute_group_group(int groupbit_A, int groupbit_B, int AA_flag)
+void EwaldPANNA::compute_group_group(int groupbit_A, int groupbit_B, int AA_flag)
 {
   if (slabflag && triclinic)
     error->all(FLERR,"Cannot (yet) use K-space slab "
@@ -1376,19 +1884,19 @@ void Ewald::compute_group_group(int groupbit_A, int groupbit_B, int AA_flag)
 
 /* ----------------------------------------------------------------------
    Slab-geometry correction term to dampen inter-slab interactions between
-   periodically repeating slabs.  Yields good approximation to 2D Ewald if
+   periodically repeating slabs.  Yields good approximation to 2D EwaldPANNA if
    adequate empty space is left between repeating slabs (J. Chem. Phys.
    111, 3155).  Slabs defined here to be parallel to the xy plane. Also
    extended to non-neutral systems (J. Chem. Phys. 131, 094107).
 ------------------------------------------------------------------------- */
 
-void Ewald::slabcorr_groups(int groupbit_A, int groupbit_B, int AA_flag)
+void EwaldPANNA::slabcorr_groups(int groupbit_A, int groupbit_B, int AA_flag)
 {
   // compute local contribution to global dipole moment
 
   double *q = atom->q;
   double **x = atom->x;
-  double zprd_slab = domain->zprd*slab_volfactor;
+  double zprd = domain->zprd;
   int *mask = atom->mask;
   int nlocal = atom->nlocal;
 
@@ -1444,7 +1952,7 @@ void Ewald::slabcorr_groups(int groupbit_A, int groupbit_B, int AA_flag)
   const double efact = qscale * MY_2PI/volume;
 
   e2group += efact * (dipole_A*dipole_B - 0.5*(qsum_A*dipole_r2_B +
-    qsum_B*dipole_r2_A) - qsum_A*qsum_B*zprd_slab*zprd_slab/12.0);
+    qsum_B*dipole_r2_A) - qsum_A*qsum_B*zprd*zprd/12.0);
 
   // add on force corrections
 
@@ -1456,7 +1964,7 @@ void Ewald::slabcorr_groups(int groupbit_A, int groupbit_B, int AA_flag)
    allocate group-group memory that depends on # of K-vectors
 ------------------------------------------------------------------------- */
 
-void Ewald::allocate_groups()
+void EwaldPANNA::allocate_groups()
 {
   // group A
 
@@ -1477,7 +1985,7 @@ void Ewald::allocate_groups()
    deallocate group-group memory that depends on # of K-vectors
 ------------------------------------------------------------------------- */
 
-void Ewald::deallocate_groups()
+void EwaldPANNA::deallocate_groups()
 {
   // group A
 

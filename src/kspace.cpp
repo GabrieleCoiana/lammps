@@ -27,6 +27,9 @@
 #include <cmath>
 #include <cstring>
 
+// GABRIELE
+#include "utils.h"
+
 using namespace LAMMPS_NS;
 
 static constexpr double SMALL = 0.00001;
@@ -202,6 +205,7 @@ void KSpace::pair_check()
                "KSpace style {} requires a pair style", force->kspace_style);
 
   bool compatible = true;
+  
   if (ewaldflag && !force->pair->ewaldflag) compatible = false;
   if (pppmflag && !force->pair->pppmflag) compatible = false;
   if (msmflag && !force->pair->msmflag) compatible = false;
@@ -211,6 +215,7 @@ void KSpace::pair_check()
   if (tip4pflag && !force->pair->tip4pflag) compatible = false;
   if (force->pair->dispersionflag && !dispersionflag) compatible = false;
   if (force->pair->tip4pflag && !tip4pflag) compatible = false;
+
 
   if (!compatible)
     error->all(FLERR, Error::NOLASTLINE,
