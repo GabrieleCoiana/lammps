@@ -12,17 +12,25 @@ read_data       POSCAR_MgO.lmp
 replicate       1 1 1 
 
 # Ewald
-kspace_style ewald 1e-09
+# kspace_style ewald 1e-09
 
 # blabla potential
-pair_style blabla 10.0
-pair_coeff * * 8.2464e13 12.48 0.042644277 0.44 3.56
+# pair_style blabla 10.0
+# pair_coeff * * 8.2464e13 12.48 0.042644277 0.44 3.56
 # pair_coeff 1 2 8.2464e13 12.48 0.042644277 0.44 3.56
 
-# pair_style   blabla  #latte
-# pair_coeff * * ../model_latte_large
 
-run 0
+# panna sr potential
+# pair_style     panna
+# pair_coeff * * ../model_MgO panna.in
+# panna lr potential
+pair_style   panna/long 0
+pair_coeff * * model_MgO_panna panna.in 0.0
+kspace_style ewald/panna 1e-6 model_MgO_panna panna.in
+
+
+
+run 100
 # --- end MD ---
 
 
