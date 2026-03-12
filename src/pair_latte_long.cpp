@@ -7,7 +7,7 @@
 //###########################################################################
 
 #include "kspace.h"
-#include "pair_panna_long.h"
+#include "pair_latte_long.h"
 #include "ewald_panna.h"
 #include <mpi.h>
 #include "math.h"

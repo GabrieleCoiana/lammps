@@ -1,5 +1,5 @@
 ##########################################################
-# MD with latte on diamond
+# MD with latte on diamondaaa
 ##########################################################
 dimension       3
 boundary        p p p   # periodic boundary conditions 
@@ -21,12 +21,12 @@ replicate       1 1 1
 
 
 # panna sr potential
-# pair_style     panna
-# pair_coeff * * ../model_MgO panna.in
+#pair_style     panna
+#pair_coeff * * ../model_MgO panna.in
 # panna lr potential
+kspace_style ewald/panna 1e-6 model_MgO_panna panna.in
 pair_style   panna/long 0
 pair_coeff * * model_MgO_panna panna.in 0.0
-kspace_style ewald/panna 1e-6 model_MgO_panna panna.in
 
 
 

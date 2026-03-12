@@ -29,7 +29,7 @@ file = weights_O.dat
 activations = 1,1,0
 
 [LONG_RANGE]
-gaussian_width = [0.2121320343559643 0.4242640687119285]
+gaussian_width = [0.2121320343559643, 0.4242640687119285]
 atomic_hardness = [7.646235, 12.156940500000001]
 electronegativity = [3.8231175, 7.53958375]
 min_eigenvalue = 0.0
