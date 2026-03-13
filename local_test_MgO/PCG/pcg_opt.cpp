@@ -6,8 +6,9 @@
 #include <Eigen/Dense>
 #include <Eigen/IterativeLinearSolvers>
 
-using matrix = std::vector<std::vector<double>>;
+
 using vector = std::vector<double>;
+using matrix = std::vector<double>; // n*n matrix stored in row-major order
 
 void compare_solutions(const Eigen::VectorXd& x1, const Eigen::VectorXd& x2) {
     bool are_equal = true;
@@ -30,18 +31,24 @@ void compare_solutions(const Eigen::VectorXd& x1, const Eigen::VectorXd& x2) {
     std::cout << "Mean Absolute Error: " << MAE << "\n";
 }
 
-vector Ax(const matrix& A, const vector& x) {
-    int n = A.size();
-    vector result(n, 0.0); // default initialize to 0.0
+inline double Aij(const matrix& A, int n, int i, int j) {
+    return A[(size_t)i * n + j];
+}
+
+
+void Ax_into(const matrix& A, int n, const vector& x, vector& y) {
+    // assumes y.size() == n
     #pragma omp parallel for
     for (int i = 0; i < n; ++i) {
+        double s = 0.0;
+        const size_t row = (size_t)i * n;
         for (int j = 0; j < n; ++j) {
-            result[i] += A[i][j] * x[j];
+            s += A[row + j] * x[j];
         }
+        y[i] = s;
     }
-    
-    return result;
 }
+
 
 double dot(const vector& a, const vector& b) {
     double result = 0.0;
@@ -53,89 +60,36 @@ double dot(const vector& a, const vector& b) {
 }
 
 
-vector cg(const matrix& A, const vector& b, int max_iter = 1000, double tol = 1e-06) {
-    std::cout << "Starting Conjugate Gradient solver...\n";
-    int n = A.size();
-    vector x(n, 0.0); // initial guess
-
-    vector r = vector(n, 0.0); // b - Ax(A, x), but since x is zero, r = b
-    for (int i = 0; i < n; ++i) {
-        r[i] = b[i];
-    }
-    vector p = r; // initial search direction
-    double r2 = dot(r, r); // initial residual magnitude squared
-
-    int i = 0;
-    while (i < max_iter && r2 > tol * tol)
-    {
-        vector q = Ax(A, p); // A*p, O(n^2), better to do this once per iteration
-        double alpha = r2 / dot(p, q); // step size that minimizes the error along p
-
-        for (int j = 0; j < n; ++j) {
-            x[j] += alpha * p[j]; // update solution
-            r[j] -= alpha * q[j]; // update residual
-            }
-        
-        if (i % 100 == 0) {
-            for (int i = 0; i < n; ++i) {
-                r[i] = b[i] - dot(A[i], x); // recompute residual every 100 iterations to prevent error accumulation
-            }
-        }
-
-        double r2new = dot(r, r); // update residual magnitude squared
-
-        double beta = r2new / r2; // coefficient for new search direction
-        
-        for (int j = 0; j < n; ++j) {
-            p[j] = r[j] + beta * p[j]; // update search direction
-        }
-
-        r2 = r2new;
-        ++i;
-
-        // Print progress every 100 iterations
-        if (i % 100 == 0) {
-            std::cout << "Iteration " << i << ", residual: " << std::sqrt(r2) << "\n";
-        }
-    }
-    if (i == max_iter) {
-        std::cout << "CG did not converge within the maximum number of iterations. Final residual: " << std::sqrt(r2) << "\n";
-    } else {
-        std::cout << "CG converged in " << i << " iterations with residual " << std::sqrt(r2) << "\n";
-    }
-    return x;
-}
 
 vector pcg(const matrix& A, const vector& b, const vector& M, int max_iter = 1000, double tol = 1e-06) {
-    std::cout << "Starting Preconditioned Conjugate Gradient solver...\n";
-    int n = A.size();
+    std::cout << "\nStarting custom Preconditioned Conjugate Gradient solver...\n";
+    int n = b.size();
     vector x(n, 0.0); // initial guess
 
     vector r = b; // b - Ax(A, x), but since x is zero, r = b
     
-    vector z(n, 0.0); // preconditioned residual
+    vector z(n); // preconditioned residual
+    vector p(n); // search direction
+    vector Ap(n); // A*p
     
     #pragma omp parallel for
-    for (int i = 0; i < n; ++i) {
-        z[i] = r[i] / M[i]; // apply preconditioner (Jacobi)
-    }   
+    for (int i = 0; i < n; ++i) z[i] = r[i] / M[i]; // apply preconditioner (Jacobi)   
 
-
-    vector p = z; // initial search direction
+    p = z; // initial search direction
+    
     double rz = dot(r, z); // initial residual magnitude squared
     double r2 = dot(r, r); // for monitoring convergence
 
     int i = 0;
     while (i < max_iter && r2 > tol * tol)
     {
-        vector Ap = Ax(A, p); // A*p, O(n^2), better to do this once per iteration
-        double pAp = dot(p, Ap);         // p^T A p
-        if (pAp <= 0.0) {
-            std::cerr << "Nonpositive denom p^T A p = " << pAp
-                      << " at iter " << i << ". A or preconditioner may be invalid.\n";
-            break;
-        }
+        Ax_into(A, n, p, Ap); // A*p, O(n^2), better to do this once per iteration, parallel inside
+        double pAp = dot(p, Ap);  // p^T A p, parallel inside
+
+        assert (pAp > 0.0);
+
         double alpha = rz / pAp; // step size that minimizes the error along p
+
 
         #pragma omp parallel for
         for (int j = 0; j < n; ++j) {
@@ -156,7 +110,7 @@ vector pcg(const matrix& A, const vector& b, const vector& M, int max_iter = 100
             z[j] = r[j] / M[j]; // apply preconditioner (Jacobi)
         }
       
-        double rznew = dot(r, z); // update residual magnitude squared
+        double rznew = dot(r, z); // update residual magnitude squared, parallel inside
 
         double beta = rznew / rz; // coefficient for new search direction
 
@@ -165,15 +119,21 @@ vector pcg(const matrix& A, const vector& b, const vector& M, int max_iter = 100
             p[j] = z[j] + beta * p[j]; // update search direction
         }
 
+    
         rz = rznew;
-        r2 = dot(r, r); // for monitoring convergence
+        r2 = dot(r, r); // for monitoring convergence, parallel inside
         ++i;
+    
+        
 
-        // Print progress every 100 iterations
-        if (i % 100 == 0) {
-            std::cout << "Iteration " << i << ", residual: " << std::sqrt(r2) << "\n";
-        }
+        // // Print progress every 100 iterations
+        // if (i % 100 == 0) {
+        //     std::cout << "Iteration " << i << ", residual: " << std::sqrt(r2) << "\n";
+        // }
+    
     }
+
+
     if (i == max_iter) {
         std::cout << "CG did not converge within the maximum number of iterations. Final residual: " << std::sqrt(r2) << "\n";
     } else {
@@ -184,7 +144,7 @@ vector pcg(const matrix& A, const vector& b, const vector& M, int max_iter = 100
 
 int main() {
     // Define matrix dimension
-    const int N = 3000;
+    const int N = 4000;
 
     // Make a symmetric positive definite matrix A by controlling its eigenvalues
     Eigen::MatrixXd M = Eigen::MatrixXd::Random(N, N);
@@ -290,7 +250,7 @@ int main() {
     Eigen::VectorXd x = eigen_A.llt().solve(eigen_b);   // Cholesky (fastest if SPD)
     auto end_solve = std::chrono::high_resolution_clock::now();
     auto duration_solve = std::chrono::duration_cast<std::chrono::milliseconds>(end_solve - start_solve);
-    std::cout << "Time for solving Ax = b with Eigen: " << duration_solve.count() << " ms" << std::endl;    
+    // std::cout << "\nTime for solving Ax = b with Eigen: " << duration_solve.count() << " ms" << std::endl;    
 
     start_solve = std::chrono::high_resolution_clock::now();
     // Solve with Eigen's Conjugate Gradient
@@ -304,10 +264,10 @@ int main() {
             << " error: " << ecg.error() << "\n";
     end_solve = std::chrono::high_resolution_clock::now();
     duration_solve = std::chrono::duration_cast<std::chrono::milliseconds>(end_solve - start_solve);
-    std::cout << "Time for solving Ax = b with Eigen CG: " << duration_solve.count() << " ms" << std::endl;   
+    std::cout << "\nTime for solving Ax = b with Eigen CG: " << duration_solve.count() << " ms" << std::endl;   
 
     // Compare solutions
-    compare_solutions(x, x2);
+    // compare_solutions(x, x2);
 
     // // Print the solution
     // std::cout << "Solution with Eigen x:\n";
@@ -316,12 +276,11 @@ int main() {
     // }
     // std::cout << "\n";
 
-    matrix A(N, vector(N));
-    for (int i = 0; i < N; ++i) {
-        for (int j = 0; j < N; ++j) {
-            A[i][j] = eigen_A(i, j);
-        }
-    }
+    matrix Aflat((size_t)N * N);
+    for (int i = 0; i < N; ++i)
+        for (int j = 0; j < N; ++j)
+            Aflat[(size_t)i * N + j] = eigen_A(i, j);
+
     vector b(N);
     for (int i = 0; i < N; ++i) {
         b[i] = eigen_b(i);
@@ -329,7 +288,7 @@ int main() {
 
     vector m(N);
     for (int i = 0; i < N; ++i) {        
-        m[i] = A[i][i]; // Jacobi preconditioner
+        m[i] = Aflat[(size_t)i * N + i]; // Jacobi preconditioner
         // m[i] = eigenvalues(i); // ideal preconditioner (eigenvalues of A)
     }
 
@@ -338,11 +297,11 @@ int main() {
 
     auto start_cg = std::chrono::high_resolution_clock::now();
     // Solve Ax = b with Conjugate Gradient
-    vector x_pcg = pcg(A, b, m);
+    vector x_pcg = pcg(Aflat, b, m);
     // vector x_cg = cg(A, b);
     auto end_cg = std::chrono::high_resolution_clock::now();
     auto duration_cg = std::chrono::duration_cast<std::chrono::milliseconds>(end_cg - start_cg);
-    std::cout << "Time for solving Ax = b with Conjugate Gradient: " << duration_cg.count() << " ms" << std::endl;
+    std::cout << "\nTime for solving Ax = b with Conjugate Gradient: " << duration_cg.count() << " ms" << std::endl;
     // // Print the solution
     // std::cout << "Solution with Conjugate Gradient x_cg:\n";
     // for (int i = 0; i < N; ++i) {
@@ -357,8 +316,8 @@ int main() {
     // std::cout << "Comparing CG solution to Eigen's direct solve:\n";
     // compare_solutions(eigen_x_cg, x);
 
-    std::cout << "Comparing PCG solution to Eigen's direct solve:\n";
-    compare_solutions(eigen_x_pcg, x);
+    // std::cout << "Comparing PCG solution to Eigen's direct solve:\n";
+    // compare_solutions(eigen_x_pcg, x);
 
 
 

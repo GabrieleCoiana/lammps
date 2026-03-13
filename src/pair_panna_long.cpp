@@ -401,9 +401,8 @@ void PairPANNALong::PCG(double *xx, double *b, double *Fpp, int max_iter, double
     compute_A_dot_v_realspace(xx, M, Av);
   }
   else{
-   // was:  force->kspace->compute_A_dot_v(xx, M, Av);
-   // GAB changed it to
-   compute_A_dot_v(xx, M, Av);
+   force->kspace->compute_A_dot_v(xx, M, Av);
+   
   }
 
   // collect and distribute A_dot_h
@@ -431,9 +430,8 @@ void PairPANNALong::PCG(double *xx, double *b, double *Fpp, int max_iter, double
       compute_A_dot_v_realspace(h, M, Av);
     }
     else{
-      // was: force->kspace->compute_A_dot_v(h, M, Av); 
-      // GAB changed it to
-      compute_A_dot_v(xx, M, Av);
+      force->kspace->compute_A_dot_v(h, M, Av); 
+
     }
     for (i = 0; i<n;i++){
       Av[i] = Av[i] + Fpp[i] * h[i];
@@ -549,78 +547,6 @@ void PairPANNALong::compute_A_dot_v_realspace(double *v, double *M, double *A_do
 
 
 
-/* ---------------------------------------------------------------------- */
-// Previously in ewald_panna.cpp
-void EwaldPANNA::compute_A_dot_v(double *v, double *M, double *A_dot_v)
-{
-  int i,j,k;
-  // extend size of per-atom arrays if necessary
-
-
-  if (atom->nmax > nmax) {
-       memory->destroy(ek);
-       memory->destroy3d_offset(cs,-kmax_created);
-       memory->destroy3d_offset(sn,-kmax_created);
-       nmax = atom->nmax;
-       memory->create(ek,nmax,3,"ewald:ek");
-       memory->create3d_offset(cs,-kmax,kmax,3,nmax,"ewald:cs");
-       memory->create3d_offset(sn,-kmax,kmax,3,nmax,"ewald:sn");
-       kmax_created = kmax;
-  }
-
-  double gauss_term, alpha2, sqk;
-  int nlocal = atom->nlocal;
-  double preu = 4.0*MY_PI/volume;
-  int *type = atom->type;
-  if (triclinic == 0)
-    eik_dot_r(v);
-  else
-    eik_dot_r_triclinic(v);
-  // loop over K-vectors and local atoms
-
-  double **x = atom->x;
-
-  int kx,ky,kz;
-  double cypz,sypz, coskr_i, sinkr_i;
-  const double qscale = force->qqrd2e;
-  //const double qscale = 14.39964547842567;
-  double vsum = 0.0;
-
-  MPI_Allreduce(sfacrl,sfacrl_all,kcount,MPI_DOUBLE,MPI_SUM,world);
-  MPI_Allreduce(sfacim,sfacim_all,kcount,MPI_DOUBLE,MPI_SUM,world);
-
-  for (int i = 0; i < nlocal; i++){
-    A_dot_v[i]=0.0;
-    M[i]=0.0;
-  }
-
-  // volume dependent term. It has contribution for each j
-  // It is a constant shift that contribute zero for neutral systems
-  //for (int i=0; i<nlocal; i++)vsum += v[i];
-  //for (int i = 0; i < nlocal; i++)A_dot_v[i] += qscale * MY_PI / (g_ewald * g_ewald * volume) * vsum; 
-//sum is done on the positive plane
-  for (k = 0; k < kcount; k++) {
-    kx = kxvecs[k];
-    ky = kyvecs[k];
-    kz = kzvecs[k];
-    sqk=preu/ug[k];
-    if (sqk<=gsqmx){
-      for (int i = 0; i < nlocal; i++) {
-        cypz = cs[ky][1][i]*cs[kz][2][i] - sn[ky][1][i]*sn[kz][2][i];
-        sypz = sn[ky][1][i]*cs[kz][2][i] + cs[ky][1][i]*sn[kz][2][i];
-        coskr_i = cs[kx][0][i]*cypz - sn[kx][0][i]*sypz;
-        sinkr_i = sn[kx][0][i]*cypz + cs[kx][0][i]*sypz;
-        double alpha2 = gaussian_width[type[i]-1] * gaussian_width[type[i]-1];
-        gauss_term = exp(-alpha2*sqk/4.0);
-        A_dot_v[i] += (2.0*qscale * gauss_term * ug[k] * (coskr_i*sfacrl_all[k] + sinkr_i*sfacim_all[k]));
-        M[i] += (2.0*qscale * gauss_term * gauss_term * ug[k]);
-
-      }
-    }
-
-
-  }
-}
 
 
 // ########################################################
@@ -1499,6 +1425,11 @@ void PairPANNALong::init_style()
    if (force->kspace == NULL)
      error->all(FLERR,"Pair style requires a KSpace style");
  }
+
+ // checking that the kspace style is compatible with this long range style
+ if (strcmp(force->kspace_style,"ewald/panna") != 0) 
+  error->all(FLERR,
+    "PairPANNALong requires kspace_style ewald/panna");
 
 
 }

@@ -119,9 +119,6 @@ void Ewald::init()
   // compute two charge force
 
   two_charge();
-  // GABRIELE
-  utils::logmesg(lmp,"GABRIIIII {} \n", two_charge());
-
 
   // extract short-range Coulombic cutoff from pair style
 

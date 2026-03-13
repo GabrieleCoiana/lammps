@@ -54,7 +54,6 @@ public:
   double dot( double *, double *, int);
   double norm( double *, int);
   void compute_A_dot_v_realspace(double*, double*, double*);
-  void compute_A_dot_v(double *, double *, double *){}; // GABRIELE added this and removed it from kspace.h
   void allocate_storage();
   //parameters for computing charges
   //fictitious charges

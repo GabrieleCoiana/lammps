@@ -469,8 +469,6 @@ double EwaldPANNA::rms(int km, double prd, bigint natoms, double q2)
   return value;
 }
 
-// GAB commented out because this function is now in pair_panna_long
-/*  
 void EwaldPANNA::compute_A_dot_v(double *v, double *M, double *A_dot_v)
 {
   int i,j,k;
@@ -541,7 +539,7 @@ void EwaldPANNA::compute_A_dot_v(double *v, double *M, double *A_dot_v)
 
   }
 }
- */
+
 
 /* ----------------------------------------------------------------------
    compute the EwaldPANNA long-range force, energy, virial

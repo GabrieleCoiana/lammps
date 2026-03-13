@@ -40,7 +40,7 @@ using namespace MathConst;
 
 /* ---------------------------------------------------------------------- */
 // Helper funcion for fast integer power
-double ipow_el(double b, int e){
+double ipow_el_latte(double b, int e){
     double r = 1.0;
     while (e>0){
         if (e & 1) r *= b;
@@ -51,7 +51,7 @@ double ipow_el(double b, int e){
 }
 
 // Helper function for matrix multiplication
-void matmul_el(double* __restrict__ a, const double* b, const double* c, int iM, int jM, int kM){
+void matmul_el_latte(double* __restrict__ a, const double* b, const double* c, int iM, int jM, int kM){
   for(int i=0; i<iM; i++)
     for(int k=0; k<kM; k++)
       for(int j=0;j<jM; j++)
@@ -63,7 +63,7 @@ void matmul_el(double* __restrict__ a, const double* b, const double* c, int iM,
 // ########################################################
 //
 
-PairPANNALong::PairPANNALong(LAMMPS *lmp) : Pair(lmp)
+PairLATTELong::PairLATTELong(LAMMPS *lmp) : Pair(lmp)
 {
   writedata = 1;
   ewaldflag = 1;
@@ -82,7 +82,7 @@ PairPANNALong::PairPANNALong(LAMMPS *lmp) : Pair(lmp)
 // ########################################################
 //
 
-PairPANNALong::~PairPANNALong()
+PairLATTELong::~PairLATTELong()
 {
 
   if (allocated) {
@@ -98,7 +98,7 @@ PairPANNALong::~PairPANNALong()
 // ########################################################
 // ########################################################
 // Function computing gvect and its derivative
-void PairPANNALong::compute_gvect(int ind1, double **x, int* type,
+void PairLATTELong::compute_gvect(int ind1, double **x, int* type,
                               int* neighs, int num_neigh,
                               double *G, double* dGdx){
   const double epscorr = 0.001;
@@ -186,9 +186,9 @@ void PairPANNALong::compute_gvect(int ind1, double **x, int* type,
         sin_ijk[Thi] = sqrt(1.0 - cos_ijk * cos_ijk + 
                            epscorr * par.Thi_sin[Thi] * par.Thi_sin[Thi]);
         fcrad[Thi] = 0.5 * ( 1.0 + par.Thi_cos[Thi] * cos_ijk + par.Thi_sin[Thi] * sin_ijk[Thi] );
-        mod_norm[Thi] = ipow_el( 0.5 * (1.0 + sqrt(1.0 + epscorr * par.Thi_sin[Thi] * par.Thi_sin[Thi] ) ), 
+        mod_norm[Thi] = ipow_el_latte( 0.5 * (1.0 + sqrt(1.0 + epscorr * par.Thi_sin[Thi] * par.Thi_sin[Thi] ) ), 
                         par.zeta[Thi]);
-        rad_mod[Thi] = ipow_el(fcrad[Thi], par.zeta[Thi]-1) / mod_norm[Thi];
+        rad_mod[Thi] = ipow_el_latte(fcrad[Thi], par.zeta[Thi]-1) / mod_norm[Thi];
       }
       // Loop over all bins
       for(int Rsi=0; Rsi<par.RsN_ang; Rsi++){
@@ -234,7 +234,7 @@ void PairPANNALong::compute_gvect(int ind1, double **x, int* type,
 
 }
 
-void PairPANNALong::compute_network(double *G, 
+void PairLATTELong::compute_network(double *G, 
                                     double *E, 
                                     double *dEdG, 
                                     double *dEpdG, 
@@ -268,7 +268,7 @@ void PairPANNALong::compute_network(double *G,
       }
     }
     // da_i/dg_k += w_ij * dx_j/dg_k
-    matmul_el(dlay2,network[type][2*l],dlay1,size2,par.gsize,size1);
+    matmul_el_latte(dlay2,network[type][2*l],dlay1,size2,par.gsize,size1);
 
     // Apply appropriate activation
     // Gaussian
@@ -320,7 +320,7 @@ void PairPANNALong::compute_network(double *G,
  * To use the standard CG, set the matrix elements of M to 1.0
  * Based on test, the PCG converge faster so it is adopted.
 */
-double PairPANNALong::norm( double *v, int n )
+double PairLATTELong::norm( double *v, int n )
 {
   int  i, ii;
   double my_sum, norm_sqr;
@@ -335,7 +335,7 @@ double PairPANNALong::norm( double *v, int n )
 }
 
 /* ---------------------------------------------------------------------- */
-double PairPANNALong::dot( double *u, double *v, int n )
+double PairLATTELong::dot( double *u, double *v, int n )
 {
   int  i, ii;
   double my_dot, all_dot ;
@@ -349,7 +349,7 @@ double PairPANNALong::dot( double *u, double *v, int n )
   return all_dot;
 }
 /* ---------------------------------------------------------------------- */
-int PairPANNALong::A_dot_vect( double **A, double *x, double *my_vect, int n )
+int PairLATTELong::A_dot_vect( double **A, double *x, double *my_vect, int n )
 {
   int  i,j;
 
@@ -367,7 +367,7 @@ int PairPANNALong::A_dot_vect( double **A, double *x, double *my_vect, int n )
 }
 /* ---------------------------------------------------------------------- */
 
-int PairPANNALong:: M_inv_dot_vect( double *M, double *x, double *my_vect, int n )
+int PairLATTELong:: M_inv_dot_vect( double *M, double *x, double *my_vect, int n )
 {
   int  i,j;
 
@@ -378,7 +378,7 @@ int PairPANNALong:: M_inv_dot_vect( double *M, double *x, double *my_vect, int n
 }
 
 /* ---------------------------------------------------------------------- */
-void PairPANNALong::PCG(double *xx, double *b, double *Fpp, int max_iter, double tol)
+void PairLATTELong::PCG(double *xx, double *b, double *Fpp, int max_iter, double tol)
 {
   double *h, *g;
   double *v;
@@ -431,9 +431,7 @@ void PairPANNALong::PCG(double *xx, double *b, double *Fpp, int max_iter, double
       compute_A_dot_v_realspace(h, M, Av);
     }
     else{
-      // was: force->kspace->compute_A_dot_v(h, M, Av); 
-      // GAB changed it to
-      compute_A_dot_v(xx, M, Av);
+      force->kspace->compute_A_dot_v(h, M, Av); 
     }
     for (i = 0; i<n;i++){
       Av[i] = Av[i] + Fpp[i] * h[i];
@@ -486,7 +484,7 @@ void PairPANNALong::PCG(double *xx, double *b, double *Fpp, int max_iter, double
 //compute realspace contribution to A_dot_v
 /* ---------------------------------------------------------------------- */
 
-void PairPANNALong::compute_A_dot_v_realspace(double *v, double *M, double *A_dot_v)
+void PairLATTELong::compute_A_dot_v_realspace(double *v, double *M, double *A_dot_v)
 {
   int i,j,ii,jj,inum,jnum,itype,jtype;
   double xtmp,ytmp,ztmp,delx,dely,delz;
@@ -549,78 +547,6 @@ void PairPANNALong::compute_A_dot_v_realspace(double *v, double *M, double *A_do
 
 
 
-/* ---------------------------------------------------------------------- */
-// Previously in ewald_panna.cpp
-void EwaldPANNA::compute_A_dot_v(double *v, double *M, double *A_dot_v)
-{
-  int i,j,k;
-  // extend size of per-atom arrays if necessary
-
-
-  if (atom->nmax > nmax) {
-       memory->destroy(ek);
-       memory->destroy3d_offset(cs,-kmax_created);
-       memory->destroy3d_offset(sn,-kmax_created);
-       nmax = atom->nmax;
-       memory->create(ek,nmax,3,"ewald:ek");
-       memory->create3d_offset(cs,-kmax,kmax,3,nmax,"ewald:cs");
-       memory->create3d_offset(sn,-kmax,kmax,3,nmax,"ewald:sn");
-       kmax_created = kmax;
-  }
-
-  double gauss_term, alpha2, sqk;
-  int nlocal = atom->nlocal;
-  double preu = 4.0*MY_PI/volume;
-  int *type = atom->type;
-  if (triclinic == 0)
-    eik_dot_r(v);
-  else
-    eik_dot_r_triclinic(v);
-  // loop over K-vectors and local atoms
-
-  double **x = atom->x;
-
-  int kx,ky,kz;
-  double cypz,sypz, coskr_i, sinkr_i;
-  const double qscale = force->qqrd2e;
-  //const double qscale = 14.39964547842567;
-  double vsum = 0.0;
-
-  MPI_Allreduce(sfacrl,sfacrl_all,kcount,MPI_DOUBLE,MPI_SUM,world);
-  MPI_Allreduce(sfacim,sfacim_all,kcount,MPI_DOUBLE,MPI_SUM,world);
-
-  for (int i = 0; i < nlocal; i++){
-    A_dot_v[i]=0.0;
-    M[i]=0.0;
-  }
-
-  // volume dependent term. It has contribution for each j
-  // It is a constant shift that contribute zero for neutral systems
-  //for (int i=0; i<nlocal; i++)vsum += v[i];
-  //for (int i = 0; i < nlocal; i++)A_dot_v[i] += qscale * MY_PI / (g_ewald * g_ewald * volume) * vsum; 
-//sum is done on the positive plane
-  for (k = 0; k < kcount; k++) {
-    kx = kxvecs[k];
-    ky = kyvecs[k];
-    kz = kzvecs[k];
-    sqk=preu/ug[k];
-    if (sqk<=gsqmx){
-      for (int i = 0; i < nlocal; i++) {
-        cypz = cs[ky][1][i]*cs[kz][2][i] - sn[ky][1][i]*sn[kz][2][i];
-        sypz = sn[ky][1][i]*cs[kz][2][i] + cs[ky][1][i]*sn[kz][2][i];
-        coskr_i = cs[kx][0][i]*cypz - sn[kx][0][i]*sypz;
-        sinkr_i = sn[kx][0][i]*cypz + cs[kx][0][i]*sypz;
-        double alpha2 = gaussian_width[type[i]-1] * gaussian_width[type[i]-1];
-        gauss_term = exp(-alpha2*sqk/4.0);
-        A_dot_v[i] += (2.0*qscale * gauss_term * ug[k] * (coskr_i*sfacrl_all[k] + sinkr_i*sfacim_all[k]));
-        M[i] += (2.0*qscale * gauss_term * gauss_term * ug[k]);
-
-      }
-    }
-
-
-  }
-}
 
 
 // ########################################################
@@ -629,7 +555,7 @@ void EwaldPANNA::compute_A_dot_v(double *v, double *M, double *A_dot_v)
 // Determine the energy and forces for the current structure.
 
 /* ---------------------------------------------------------------------- */
-void PairPANNALong::compute(int eflag, int vflag)
+void PairLATTELong::compute(int eflag, int vflag)
 {
   if (eflag || vflag) ev_setup(eflag,vflag);
   else evflag = vflag_fdotr = 0;
@@ -880,7 +806,7 @@ void PairPANNALong::compute(int eflag, int vflag)
 // Fill key,value if 'key=value', return 2
 // Set value=... if ..., return 3
 // Return 0 if eof, <0 if error, >0 if okay
-int PairPANNALong::get_input_line(std::ifstream* file, std::string* key, std::string* value){
+int PairLATTELong::get_input_line(std::ifstream* file, std::string* key, std::string* value){
   std::string line;
   int parsed = 0; int vc = 1;
   while(!parsed){
@@ -918,7 +844,7 @@ int PairPANNALong::get_input_line(std::ifstream* file, std::string* key, std::st
   return -1;
 }
 
-int PairPANNALong::get_parameters(char* directory, char* filename)
+int PairLATTELong::get_parameters(char* directory, char* filename)
 {
   //const double panna_pi = 3.14159265358979323846;
   // Parsing the potential parameters
@@ -1411,7 +1337,7 @@ int PairPANNALong::get_parameters(char* directory, char* filename)
 // ########################################################
 // Allocates all necessary arrays.
 
-void PairPANNALong::allocate()
+void PairLATTELong::allocate()
 {
 
   allocated = 1;
@@ -1427,7 +1353,7 @@ void PairPANNALong::allocate()
 }
 /* ---------------------------------------------------------------------- */
 
-void PairPANNALong::allocate_storage()
+void PairLATTELong::allocate_storage()
 {
   int nmax = atom->nmax;
 
@@ -1445,7 +1371,7 @@ void PairPANNALong::allocate_storage()
 //                       COEFF
 // ########################################################
 // Load all the gvectors and NN parameters
-void PairPANNALong::coeff(int narg, char **arg)
+void PairLATTELong::coeff(int narg, char **arg)
 {
 
   if (!allocated) {
@@ -1484,7 +1410,7 @@ void PairPANNALong::coeff(int narg, char **arg)
 // ########################################################
 // Set up the pair style to be a NN potential.
 
-void PairPANNALong::init_style()
+void PairLATTELong::init_style()
 {
   if (force->newton_pair == 0)
     error->all(FLERR, "Pair style PANNA requires newton pair on");
@@ -1510,7 +1436,7 @@ void PairPANNALong::init_style()
 // Initilize 1 pair interaction.  Needed by LAMMPS but not
 // used in this style.
 
-double PairPANNALong::init_one(int i, int j)
+double PairLATTELong::init_one(int i, int j)
 {
   return sqrt(cutsq[i][j]); 
 }
@@ -1525,7 +1451,7 @@ double PairPANNALong::init_one(int i, int j)
 // ########################################################
 // Writes restart file. Not implemented.
 
-void PairPANNALong::write_restart(FILE *fp)
+void PairLATTELong::write_restart(FILE *fp)
 {
 
 }
@@ -1538,7 +1464,7 @@ void PairPANNALong::write_restart(FILE *fp)
 // ########################################################
 // Reads from restart file. Not implemented.
 
-void PairPANNALong::read_restart(FILE *fp)
+void PairLATTELong::read_restart(FILE *fp)
 {
  
 }
@@ -1551,7 +1477,7 @@ void PairPANNALong::read_restart(FILE *fp)
 // ########################################################
 // Writes settings to restart file. Not implemented.
 
-void PairPANNALong::write_restart_settings(FILE *fp)
+void PairLATTELong::write_restart_settings(FILE *fp)
 {
 
 }
@@ -1566,7 +1492,7 @@ void PairPANNALong::write_restart_settings(FILE *fp)
 // ########################################################
 // Reads settings from restart file. Not implemented.
 
-void PairPANNALong::read_restart_settings(FILE *fp)
+void PairLATTELong::read_restart_settings(FILE *fp)
 {
 
 }
@@ -1575,7 +1501,7 @@ void PairPANNALong::read_restart_settings(FILE *fp)
 // ########################################################
 
 // Not implemented.
-void PairPANNALong::write_data(FILE *fp)
+void PairLATTELong::write_data(FILE *fp)
 {
   /*
   for (int i = 1; i <= atom->ntypes; i++)
@@ -1584,7 +1510,7 @@ void PairPANNALong::write_data(FILE *fp)
 }
 
 // Not implemented.
-void PairPANNALong::write_data_all(FILE *fp)
+void PairLATTELong::write_data_all(FILE *fp)
 {
   /*
   for (int i = 1; i <= atom->ntypes; i++)
@@ -1594,7 +1520,7 @@ void PairPANNALong::write_data_all(FILE *fp)
 }
 
 // Not implemented.
-double PairPANNALong::single(int i, int j, int itype, int jtype, double rsq,
+double PairLATTELong::single(int i, int j, int itype, int jtype, double rsq,
                       double factor_coul, double factor_lj,
                       double &fforce)
 {
@@ -1608,7 +1534,7 @@ double PairPANNALong::single(int i, int j, int itype, int jtype, double rsq,
    global settings
 %------------------------------------------------------------------------- */
 
-void PairPANNALong::settings(int narg, char **arg)
+void PairLATTELong::settings(int narg, char **arg)
 {
   if (narg != 1) error->all(FLERR,"Illegal pair_style command");
 

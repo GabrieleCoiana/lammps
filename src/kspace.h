@@ -174,7 +174,11 @@ class KSpace : protected Pointers {
 
   virtual int modify_param(int, char **) { return 0; }
   virtual double memory_usage() { return 0.0; }
+ 
+  // This is added for EwaldPANNA. It is not implemented for other KSpace styles, and will throw an error if called for those styles. 
+  virtual void compute_A_dot_v(double *, double *, double *) {}; 
 
+  
   /* ----------------------------------------------------------------------
    compute gamma for MSM and pair styles
    see Eq 4 from Parallel Computing 35 (2009) 164-177
